@@ -25,10 +25,13 @@ const CHINESE_FONT_NAME: &str = "stheiti";
 
 mod ansi_parser;
 mod cell;
+mod config;
 mod ssh;
 mod terminal;
 
 use ansi_parser::AnsiParser;
+use config::ConnectionSettings;
+use encoding_rs::GB18030;
 use ssh::SshClient;
 use terminal::Terminal;
 
@@ -127,6 +130,13 @@ struct App {
     ssh_client: Option<Arc<SshClient>>,
     connect_rx: Option<Receiver<Result<Arc<SshClient>, String>>>,
     connected: bool,
+    settings: ConnectionSettings,
+    login_host: String,
+    login_port: String,
+    login_username: String,
+    login_password: String,
+    connection_error: Option<String>,
+    auto_connect_attempted: bool,
     zoom: f32,
     pending_inner_size: Option<egui::Vec2>,
     last_inner_size: Option<egui::Vec2>,
@@ -135,12 +145,24 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let settings = ConnectionSettings::load_default();
+        let login_host = settings.host.clone();
+        let login_port = settings.port.to_string();
+        let login_username = settings.username.clone().unwrap_or_default();
+
         Self {
             terminal: Arc::new(Mutex::new(Terminal::new(TERMINAL_ROWS, TERMINAL_COLS))),
             parser: Arc::new(Mutex::new(AnsiParser::new())),
             ssh_client: None,
             connect_rx: None,
             connected: false,
+            settings,
+            login_host,
+            login_port,
+            login_username,
+            login_password: String::new(),
+            connection_error: None,
+            auto_connect_attempted: false,
             zoom: 1.0,
             pending_inner_size: None,
             last_inner_size: None,
@@ -151,7 +173,11 @@ impl Default for App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if !self.connected && self.connect_rx.is_none() {
+        if !self.connected
+            && self.connect_rx.is_none()
+            && self.settings.username.is_some()
+            && !self.auto_connect_attempted
+        {
             self.start_connect(ctx);
         }
         self.configure_viewport_once(ctx);
@@ -166,6 +192,7 @@ impl eframe::App for App {
                     Err(e) => {
                         log::error!("SSH error: {}", e);
                         self.connected = false;
+                        self.connection_error = Some(e);
                     }
                 }
                 self.connect_rx = None;
@@ -183,6 +210,12 @@ impl eframe::App for App {
             )
             .show(ctx, |ui| {
                 render_terminal(ui, &self.terminal);
+                if !self.connected
+                    && self.connect_rx.is_none()
+                    && (self.settings.username.is_none() || self.connection_error.is_some())
+                {
+                    self.render_login(ui, ctx);
+                }
             });
     }
 
@@ -206,12 +239,14 @@ impl App {
 
     fn start_connect(&mut self, ctx: &egui::Context) {
         self.connected = false;
+        self.auto_connect_attempted = true;
         self.ssh_client = None;
         self.terminal.lock().unwrap().clear_all();
         self.parser = Arc::new(Mutex::new(AnsiParser::new()));
 
         let terminal = Arc::clone(&self.terminal);
         let parser = Arc::clone(&self.parser);
+        let settings = self.settings.clone();
         let ctx = ctx.clone();
         let (tx, rx): (Sender<Result<Arc<SshClient>, String>>, Receiver<Result<Arc<SshClient>, String>>) = crossbeam_channel::bounded(1);
         self.connect_rx = Some(rx);
@@ -219,7 +254,7 @@ impl App {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                match SshClient::connect("bbs.newsmth.net", 22, terminal, parser, ctx).await {
+                match SshClient::connect(settings, terminal, parser, ctx).await {
                     Ok(client) => {
                         log::info!("SSH connected successfully");
                         let _ = tx.send(Ok(client));
@@ -238,6 +273,73 @@ impl App {
         self.start_connect(ctx);
     }
 
+    fn render_login(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let rect = ui.max_rect();
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(220));
+
+        egui::Area::new("login_panel".into())
+            .fixed_pos(rect.center() - egui::vec2(180.0, 110.0))
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(20, 20, 20))
+                    .inner_margin(16.0)
+                    .show(ui, |ui| {
+                        ui.set_width(360.0);
+                        ui.heading("登录配置");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Host");
+                            ui.text_edit_singleline(&mut self.login_host);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Port");
+                            ui.text_edit_singleline(&mut self.login_port);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("User");
+                            ui.text_edit_singleline(&mut self.login_username);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Pass");
+                            ui.add(egui::TextEdit::singleline(&mut self.login_password).password(true));
+                        });
+
+                        if let Some(error) = &self.connection_error {
+                            ui.colored_label(egui::Color32::LIGHT_RED, error);
+                        }
+
+                        ui.add_space(8.0);
+                        if ui.button("Connect").clicked() {
+                            if let Ok(port) = self.login_port.parse() {
+                                self.settings = ConnectionSettings {
+                                    host: self.login_host.trim().to_owned(),
+                                    port,
+                                    username: if self.login_username.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.login_username.trim().to_owned())
+                                    },
+                                    password: if self.login_password.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.login_password.clone())
+                                    },
+                                    identity_files: self.settings.identity_files.clone(),
+                                };
+                                self.connection_error = None;
+                                if self.settings.username.is_some() {
+                                    self.auto_connect_attempted = false;
+                                    self.start_connect(ctx);
+                                }
+                            } else {
+                                self.connection_error = Some("Invalid port".to_owned());
+                            }
+                        }
+                    });
+            });
+    }
+
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
         let events = ctx.input(|i| i.events.clone());
         for event in events {
@@ -253,22 +355,18 @@ impl App {
                         continue;
                     }
 
-                    if let Some(bytes) = key_event_to_bytes(key, modifiers) {
+                    if let Some(bytes) = terminal_event_to_bytes(&event) {
                         self.send_bytes(bytes);
                     }
                 }
-                egui::Event::Text(text) => {
-                    if !text.is_empty() {
-                        self.send_text(&text);
+                egui::Event::Text(_) | egui::Event::Ime(_) => {
+                    if let Some(bytes) = terminal_event_to_bytes(&event) {
+                        self.send_bytes(bytes);
                     }
                 }
                 _ => {}
             }
         }
-    }
-
-    fn send_text(&self, text: &str) {
-        self.send_bytes(text.as_bytes().to_vec());
     }
 
     fn send_bytes(&self, bytes: Vec<u8>) {
@@ -311,6 +409,29 @@ impl App {
             self.pending_inner_size = None;
             self.last_inner_size = Some(target_size);
         }
+    }
+}
+
+fn terminal_event_to_bytes(event: &egui::Event) -> Option<Vec<u8>> {
+    match event {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => key_event_to_bytes(*key, *modifiers),
+        egui::Event::Text(text) => text_to_bytes(text),
+        egui::Event::Ime(egui::ImeEvent::Commit(text)) => text_to_bytes(text),
+        _ => None,
+    }
+}
+
+fn text_to_bytes(text: &str) -> Option<Vec<u8>> {
+    if text.is_empty() {
+        None
+    } else {
+        let (bytes, _, _) = GB18030.encode(text);
+        Some(bytes.into_owned())
     }
 }
 
@@ -436,8 +557,9 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_zoom_shortcut, key_event_to_bytes, terminal_aspect_fit_size, terminal_render_scale,
-        terminal_size_for_zoom, TERMINAL_COLS, TERMINAL_ROWS,
+        handle_zoom_shortcut, key_event_to_bytes, terminal_aspect_fit_size,
+        terminal_event_to_bytes, terminal_render_scale, terminal_size_for_zoom, TERMINAL_COLS,
+        TERMINAL_ROWS,
     };
 
     #[test]
@@ -546,6 +668,13 @@ mod tests {
     }
 
     #[test]
+    fn ime_commit_sends_committed_text() {
+        let event = egui::Event::Ime(egui::ImeEvent::Commit("中文".to_owned()));
+
+        assert_eq!(terminal_event_to_bytes(&event), Some(vec![0xd6, 0xd0, 0xce, 0xc4]));
+    }
+
+    #[test]
     fn font_sizes_follow_welly_default_proportions() {
         assert_eq!(
             super::CHINESE_FONT_SIZE,
@@ -584,9 +713,28 @@ fn render_terminal(ui: &mut egui::Ui, terminal: &Arc<Mutex<Terminal>>) {
     let total_width = term.cols as f32 * cell_width;
     let total_height = term.rows as f32 * cell_height;
 
-    let (response, painter) = ui.allocate_painter(available_size, egui::Sense::hover());
+    let (response, painter) = ui.allocate_painter(available_size, egui::Sense::click());
+    if response.clicked() || !response.ctx.wants_keyboard_input() {
+        response.request_focus();
+    }
     let terminal_rect =
         egui::Rect::from_min_size(response.rect.min, egui::vec2(total_width, total_height));
+    if response.has_focus() {
+        let cursor_col = term.cursor_col.min(term.cols.saturating_sub(1));
+        let cursor_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                terminal_rect.min.x + cursor_col as f32 * cell_width,
+                terminal_rect.min.y + term.cursor_row as f32 * cell_height,
+            ),
+            egui::vec2(cell_width, cell_height),
+        );
+        ui.ctx().output_mut(|output| {
+            output.ime = Some(egui::output::IMEOutput {
+                rect: terminal_rect,
+                cursor_rect,
+            });
+        });
+    }
     paint_terminal(
         &term,
         terminal_rect,

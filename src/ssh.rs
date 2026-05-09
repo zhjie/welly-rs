@@ -1,4 +1,5 @@
 use crate::ansi_parser::AnsiParser;
+use crate::config::ConnectionSettings;
 use crate::terminal::Terminal;
 use russh::*;
 use std::sync::{Arc, Mutex};
@@ -10,8 +11,7 @@ pub struct SshClient {
 
 impl SshClient {
     pub async fn connect(
-        host: &str,
-        port: u16,
+        settings: ConnectionSettings,
         terminal: Arc<Mutex<Terminal>>,
         parser: Arc<Mutex<AnsiParser>>,
         ctx: eframe::egui::Context,
@@ -23,38 +23,8 @@ impl SshClient {
         let config = Arc::new(config);
         let sh = Client {};
 
-        let mut session = client::connect(config, (host, port), sh).await?;
-
-        let key_path = dirs::home_dir()
-            .unwrap_or_default()
-            .join("Library/Containers/com.ytang.Welly/Data/.ssh/id_ed25519");
-        
-        let auth_res = if key_path.exists() {
-            log::info!("Using SSH key authentication with: {:?}", key_path);
-            let key = russh::keys::load_secret_key(&key_path, None
-            ).map_err(|e| {
-                log::error!("Failed to load SSH key: {}", e);
-                russh::Error::CouldNotReadKey
-            })?;
-            
-            let key_with_hash = russh::keys::PrivateKeyWithHashAlg::new(
-                Arc::new(key),
-                None,
-            );
-            
-            session
-                .authenticate_publickey("cppbuilder", key_with_hash)
-                .await?
-        } else {
-            log::info!("SSH key not found, trying password authentication");
-            session
-                .authenticate_password("cppbuilder", "cppbuilder")
-                .await?
-        };
-
-        if !auth_res.success() {
-            return Err(russh::Error::CouldNotReadKey);
-        }
+        let mut session = client::connect(config, (settings.host.as_str(), settings.port), sh).await?;
+        authenticate(&mut session, &settings).await?;
 
         let mut channel = session.channel_open_session().await?;
         let channel_id = channel.id();
@@ -116,6 +86,44 @@ impl SshClient {
         let _ = session.data(self.channel_id, bytes::Bytes::copy_from_slice(data)).await;
         Ok(())
     }
+}
+
+async fn authenticate(
+    session: &mut client::Handle<Client>,
+    settings: &ConnectionSettings,
+) -> Result<(), russh::Error> {
+    let Some(username) = settings.username.as_deref() else {
+        return Err(russh::Error::NotAuthenticated);
+    };
+
+    for key_path in settings.identity_files.iter().filter(|path| path.exists()) {
+        log::info!("Trying SSH key authentication with: {:?}", key_path);
+        let key = russh::keys::load_secret_key(key_path, None).map_err(|e| {
+            log::error!("Failed to load SSH key: {}", e);
+            russh::Error::CouldNotReadKey
+        })?;
+        let key_with_hash = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None);
+
+        if session
+            .authenticate_publickey(username, key_with_hash)
+            .await?
+            .success()
+        {
+            return Ok(());
+        }
+    }
+
+    if let Some(password) = settings.password.as_deref() {
+        if session
+            .authenticate_password(username, password)
+            .await?
+            .success()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(russh::Error::NotAuthenticated)
 }
 
 struct Client {}
