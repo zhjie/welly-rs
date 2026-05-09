@@ -16,6 +16,23 @@ available consistently across macOS, Windows, and Linux. Thanks to Welly and its
 contributors for setting the shape of the experience this project is trying to
 preserve.
 
+## Usage
+
+Configure your ShuiMu SSH login in `~/.ssh/config`:
+
+```sshconfig
+Host bbs.newsmth.net
+    User cppbuilder
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+```
+
+Then run:
+
+```sh
+cargo run
+```
+
 ## Current Status
 
 - Native GUI built with `eframe`/`egui`.
