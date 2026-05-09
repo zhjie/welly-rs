@@ -1,0 +1,983 @@
+use crossbeam_channel::{Receiver, Sender};
+use eframe::egui;
+use egui::{FontData, FontDefinitions, FontFamily};
+use std::sync::{Arc, Mutex};
+
+const CELL_WIDTH: f32 = 18.0;
+const CELL_HEIGHT: f32 = 35.0;
+const CHINESE_FONT_SIZE: f32 = 32.0;
+const ENGLISH_FONT_SIZE: f32 = 26.0;
+const CHINESE_LEFT_MARGIN: f32 = 1.0;
+const CHINESE_BOTTOM_MARGIN: f32 = 1.0;
+const ENGLISH_LEFT_MARGIN: f32 = 1.0;
+const ENGLISH_BOTTOM_MARGIN: f32 = 2.0;
+const MIN_ZOOM: f32 = 0.5;
+const MAX_ZOOM: f32 = 3.0;
+const ZOOM_STEP: f32 = 1.05;
+const TERMINAL_COLS: usize = 80;
+const TERMINAL_ROWS: usize = 24;
+
+const ENGLISH_FONT_PATH: &str = "/System/Library/Fonts/Monaco.ttf";
+const ENGLISH_FONT_NAME: &str = "monaco";
+
+const CHINESE_FONT_PATH: &str = "/System/Library/Fonts/STHeiti Medium.ttc";
+const CHINESE_FONT_NAME: &str = "stheiti";
+
+mod ansi_parser;
+mod cell;
+mod ssh;
+mod terminal;
+
+use ansi_parser::AnsiParser;
+use ssh::SshClient;
+use terminal::Terminal;
+
+fn main() -> eframe::Result {
+    env_logger::init();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([
+                TERMINAL_COLS as f32 * CELL_WIDTH,
+                TERMINAL_ROWS as f32 * CELL_HEIGHT,
+            ])
+            .with_min_inner_size([
+                TERMINAL_COLS as f32 * CELL_WIDTH * MIN_ZOOM,
+                TERMINAL_ROWS as f32 * CELL_HEIGHT * MIN_ZOOM,
+            ]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Welly-rs BBS Client",
+        options,
+        Box::new(|cc| {
+            configure_fonts(&cc.egui_ctx);
+            configure_terminal_view(&cc.egui_ctx);
+            Ok(Box::new(App::default()))
+        }),
+    )
+}
+
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+
+    if let Ok(english_font) = std::fs::read(ENGLISH_FONT_PATH) {
+        fonts.font_data.insert(
+            ENGLISH_FONT_NAME.to_owned(),
+            FontData::from_owned(english_font),
+        );
+    } else {
+        log::warn!("English font not found: {}", ENGLISH_FONT_PATH);
+    }
+
+    if let Ok(chinese_font) = std::fs::read(CHINESE_FONT_PATH) {
+        fonts.font_data.insert(
+            CHINESE_FONT_NAME.to_owned(),
+            FontData::from_owned(chinese_font),
+        );
+    } else {
+        log::warn!("Chinese font not found: {}", CHINESE_FONT_PATH);
+    }
+
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, ENGLISH_FONT_NAME.to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .push(CHINESE_FONT_NAME.to_owned());
+
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, ENGLISH_FONT_NAME.to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .push(CHINESE_FONT_NAME.to_owned());
+
+    fonts.families.insert(
+        FontFamily::Name(ENGLISH_FONT_NAME.into()),
+        vec![ENGLISH_FONT_NAME.to_owned(), CHINESE_FONT_NAME.to_owned()],
+    );
+    fonts.families.insert(
+        FontFamily::Name(CHINESE_FONT_NAME.into()),
+        vec![CHINESE_FONT_NAME.to_owned(), ENGLISH_FONT_NAME.to_owned()],
+    );
+
+    ctx.set_fonts(fonts);
+}
+
+fn configure_terminal_view(ctx: &egui::Context) {
+    ctx.options_mut(|options| {
+        options.zoom_with_keyboard = false;
+    });
+    ctx.set_zoom_factor(1.0);
+}
+
+struct App {
+    terminal: Arc<Mutex<Terminal>>,
+    parser: Arc<Mutex<AnsiParser>>,
+    ssh_client: Option<Arc<SshClient>>,
+    connect_rx: Option<Receiver<Result<Arc<SshClient>, String>>>,
+    connected: bool,
+    zoom: f32,
+    pending_inner_size: Option<egui::Vec2>,
+    last_inner_size: Option<egui::Vec2>,
+    configured_viewport: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            terminal: Arc::new(Mutex::new(Terminal::new(TERMINAL_ROWS, TERMINAL_COLS))),
+            parser: Arc::new(Mutex::new(AnsiParser::new())),
+            ssh_client: None,
+            connect_rx: None,
+            connected: false,
+            zoom: 1.0,
+            pending_inner_size: None,
+            last_inner_size: None,
+            configured_viewport: false,
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.connected && self.connect_rx.is_none() {
+            self.start_connect(ctx);
+        }
+        self.configure_viewport_once(ctx);
+
+        if let Some(rx) = &self.connect_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(client) => {
+                        self.ssh_client = Some(client);
+                        self.connected = true;
+                    }
+                    Err(e) => {
+                        log::error!("SSH error: {}", e);
+                        self.connected = false;
+                    }
+                }
+                self.connect_rx = None;
+            }
+        }
+
+        self.handle_keyboard(ctx);
+        self.sync_window_size_to_terminal(ctx);
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::BLACK)
+                    .inner_margin(0.0),
+            )
+            .show(ctx, |ui| {
+                render_terminal(ui, &self.terminal);
+            });
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Color32::BLACK.to_normalized_gamma_f32()
+    }
+}
+
+impl App {
+    fn configure_viewport_once(&mut self, ctx: &egui::Context) {
+        if self.configured_viewport {
+            return;
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::ResizeIncrements(Some(egui::vec2(
+            CELL_WIDTH,
+            CELL_HEIGHT,
+        ))));
+        self.configured_viewport = true;
+    }
+
+    fn start_connect(&mut self, ctx: &egui::Context) {
+        self.connected = false;
+        self.ssh_client = None;
+        self.terminal.lock().unwrap().clear_all();
+        self.parser = Arc::new(Mutex::new(AnsiParser::new()));
+
+        let terminal = Arc::clone(&self.terminal);
+        let parser = Arc::clone(&self.parser);
+        let ctx = ctx.clone();
+        let (tx, rx): (Sender<Result<Arc<SshClient>, String>>, Receiver<Result<Arc<SshClient>, String>>) = crossbeam_channel::bounded(1);
+        self.connect_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                match SshClient::connect("bbs.newsmth.net", 22, terminal, parser, ctx).await {
+                    Ok(client) => {
+                        log::info!("SSH connected successfully");
+                        let _ = tx.send(Ok(client));
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        log::error!("SSH error: {}", e);
+                        let _ = tx.send(Err(e.to_string()));
+                    }
+                }
+            });
+        });
+    }
+
+    fn reconnect(&mut self, ctx: &egui::Context) {
+        self.start_connect(ctx);
+    }
+
+    fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        let events = ctx.input(|i| i.events.clone());
+        for event in events {
+            match event {
+                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    if modifiers.command && key == egui::Key::R {
+                        self.reconnect(ctx);
+                        continue;
+                    }
+
+                    if handle_zoom_shortcut(&mut self.zoom, key, modifiers) {
+                        self.pending_inner_size = Some(terminal_size_for_zoom(self.zoom));
+                        continue;
+                    }
+
+                    if let Some(bytes) = key_event_to_bytes(key, modifiers) {
+                        self.send_bytes(bytes);
+                    }
+                }
+                egui::Event::Text(text) => {
+                    if !text.is_empty() {
+                        self.send_text(&text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn send_text(&self, text: &str) {
+        self.send_bytes(text.as_bytes().to_vec());
+    }
+
+    fn send_bytes(&self, bytes: Vec<u8>) {
+        if let Some(client) = &self.ssh_client {
+            let client = Arc::clone(client);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = client.send_data(&bytes).await {
+                        log::error!("Send error: {}", e);
+                    }
+                });
+            });
+        }
+    }
+
+    fn sync_window_size_to_terminal(&mut self, ctx: &egui::Context) {
+        let current_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
+        let Some(current_size) = current_size else {
+            return;
+        };
+
+        let user_resized = self
+            .last_inner_size
+            .map(|last| (last - current_size).length_sq() > 1.0)
+            .unwrap_or(false);
+        self.last_inner_size = Some(current_size);
+
+        let target_size = if let Some(pending_size) = self.pending_inner_size {
+            pending_size
+        } else if user_resized {
+            terminal_aspect_fit_size(current_size)
+        } else {
+            return;
+        };
+
+        if (current_size - target_size).length_sq() > 1.0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_size));
+        } else {
+            self.pending_inner_size = None;
+            self.last_inner_size = Some(target_size);
+        }
+    }
+}
+
+fn key_event_to_bytes(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<u8>> {
+    if modifiers.command {
+        return None;
+    }
+
+    if modifiers.ctrl && !modifiers.alt {
+        return control_key_to_bytes(key);
+    }
+
+    if modifiers.alt {
+        return alt_key_to_bytes(key);
+    }
+
+    match key {
+        egui::Key::Enter => Some(vec![b'\r']),
+        egui::Key::Backspace => Some(vec![0x7f]),
+        egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
+        egui::Key::Tab => Some(vec![b'\t']),
+        egui::Key::Escape => Some(vec![0x1b]),
+        egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
+        egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
+        egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
+        egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
+        egui::Key::Home => Some(b"\x1b[1~".to_vec()),
+        egui::Key::End => Some(b"\x1b[4~".to_vec()),
+        egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
+        egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
+        _ => None,
+    }
+}
+
+fn control_key_to_bytes(key: egui::Key) -> Option<Vec<u8>> {
+    let byte = match key {
+        egui::Key::A => 0x01,
+        egui::Key::B => 0x02,
+        egui::Key::C => 0x03,
+        egui::Key::D => 0x04,
+        egui::Key::E => 0x05,
+        egui::Key::F => 0x06,
+        egui::Key::G => 0x07,
+        egui::Key::H | egui::Key::Backspace => 0x08,
+        egui::Key::I | egui::Key::Tab => 0x09,
+        egui::Key::J => 0x0a,
+        egui::Key::K => 0x0b,
+        egui::Key::L => 0x0c,
+        egui::Key::M | egui::Key::Enter => 0x0d,
+        egui::Key::N => 0x0e,
+        egui::Key::O => 0x0f,
+        egui::Key::P => 0x10,
+        egui::Key::Q => 0x11,
+        egui::Key::R => 0x12,
+        egui::Key::S => 0x13,
+        egui::Key::T => 0x14,
+        egui::Key::U => 0x15,
+        egui::Key::V => 0x16,
+        egui::Key::W => 0x17,
+        egui::Key::X => 0x18,
+        egui::Key::Y => 0x19,
+        egui::Key::Z => 0x1a,
+        egui::Key::OpenBracket | egui::Key::Escape => 0x1b,
+        egui::Key::Backslash => 0x1c,
+        egui::Key::CloseBracket => 0x1d,
+        egui::Key::Num6 => 0x1e,
+        egui::Key::Minus => 0x1f,
+        _ => return None,
+    };
+    Some(vec![byte])
+}
+
+fn alt_key_to_bytes(key: egui::Key) -> Option<Vec<u8>> {
+    match key {
+        egui::Key::ArrowUp => Some(b"\x1b[5~".to_vec()),
+        egui::Key::ArrowDown => Some(b"\x1b[6~".to_vec()),
+        egui::Key::ArrowRight => Some(b"\x1b[4~".to_vec()),
+        egui::Key::ArrowLeft => Some(b"\x1b[1~".to_vec()),
+        _ => None,
+    }
+}
+
+fn handle_zoom_shortcut(zoom: &mut f32, key: egui::Key, modifiers: egui::Modifiers) -> bool {
+    if !modifiers.command || modifiers.alt || modifiers.ctrl {
+        return false;
+    }
+
+    match key {
+        egui::Key::Plus | egui::Key::Equals => {
+            *zoom = (*zoom * ZOOM_STEP).min(MAX_ZOOM);
+            true
+        }
+        egui::Key::Minus => {
+            *zoom = (*zoom / ZOOM_STEP).max(MIN_ZOOM);
+            true
+        }
+        egui::Key::Num0 => {
+            *zoom = 1.0;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn terminal_size_for_zoom(zoom: f32) -> egui::Vec2 {
+    egui::vec2(
+        TERMINAL_COLS as f32 * CELL_WIDTH * zoom,
+        TERMINAL_ROWS as f32 * CELL_HEIGHT * zoom,
+    )
+}
+
+fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
+    let ratio = (TERMINAL_COLS as f32 * CELL_WIDTH) / (TERMINAL_ROWS as f32 * CELL_HEIGHT);
+    let height_from_width = size.x / ratio;
+
+    if height_from_width <= size.y {
+        egui::vec2(size.x, height_from_width)
+    } else {
+        egui::vec2(size.y * ratio, size.y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        handle_zoom_shortcut, key_event_to_bytes, terminal_aspect_fit_size, terminal_render_scale,
+        terminal_size_for_zoom, TERMINAL_COLS, TERMINAL_ROWS,
+    };
+
+    #[test]
+    fn control_letter_sends_ascii_control_code() {
+        assert_eq!(
+            key_event_to_bytes(egui::Key::G, egui::Modifiers::CTRL),
+            Some(vec![0x07])
+        );
+        assert_eq!(
+            key_event_to_bytes(egui::Key::Enter, egui::Modifiers::CTRL),
+            Some(vec![0x0d])
+        );
+    }
+
+    #[test]
+    fn alt_arrows_match_welly_navigation_shortcuts() {
+        assert_eq!(
+            key_event_to_bytes(egui::Key::ArrowUp, egui::Modifiers::ALT),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(egui::Key::ArrowDown, egui::Modifiers::ALT),
+            Some(b"\x1b[6~".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(egui::Key::ArrowRight, egui::Modifiers::ALT),
+            Some(b"\x1b[4~".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(egui::Key::ArrowLeft, egui::Modifiers::ALT),
+            Some(b"\x1b[1~".to_vec())
+        );
+    }
+
+    #[test]
+    fn command_shortcuts_are_not_sent_to_bbs() {
+        assert_eq!(
+            key_event_to_bytes(egui::Key::G, egui::Modifiers::COMMAND),
+            None
+        );
+    }
+
+    #[test]
+    fn command_plus_minus_adjust_zoom_without_sending_to_bbs() {
+        let mut zoom = 1.0;
+
+        assert!(handle_zoom_shortcut(
+            &mut zoom,
+            egui::Key::Plus,
+            egui::Modifiers::COMMAND
+        ));
+        assert!(zoom > 1.0);
+
+        assert!(handle_zoom_shortcut(
+            &mut zoom,
+            egui::Key::Minus,
+            egui::Modifiers::COMMAND
+        ));
+        assert!((zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn terminal_render_scale_tracks_available_size() {
+        let base_width = TERMINAL_COLS as f32 * super::CELL_WIDTH;
+        let base_height = TERMINAL_ROWS as f32 * super::CELL_HEIGHT;
+
+        assert!((terminal_render_scale(base_width, base_height, TERMINAL_COLS, TERMINAL_ROWS)
+            - 1.0)
+            .abs()
+            < f32::EPSILON);
+        assert!((terminal_render_scale(
+            base_width * 2.0,
+            base_height * 2.0,
+            TERMINAL_COLS,
+            TERMINAL_ROWS
+        ) - 2.0)
+            .abs()
+            < f32::EPSILON);
+        assert_eq!(
+            terminal_render_scale(1.0, 1.0, TERMINAL_COLS, TERMINAL_ROWS),
+            super::MIN_ZOOM
+        );
+    }
+
+    #[test]
+    fn terminal_aspect_fit_size_preserves_terminal_ratio() {
+        let wide = terminal_aspect_fit_size(egui::vec2(3000.0, 840.0));
+        let tall = terminal_aspect_fit_size(egui::vec2(1440.0, 2000.0));
+        let expected_ratio = terminal_size_for_zoom(1.0).x / terminal_size_for_zoom(1.0).y;
+
+        assert!((wide.x / wide.y - expected_ratio).abs() < 0.001);
+        assert_eq!(wide.y, 840.0);
+        assert!((tall.x / tall.y - expected_ratio).abs() < 0.001);
+        assert_eq!(tall.x, 1440.0);
+    }
+
+    #[test]
+    fn terminal_size_for_zoom_scales_full_window() {
+        assert_eq!(
+            terminal_size_for_zoom(2.0),
+            egui::vec2(
+                TERMINAL_COLS as f32 * super::CELL_WIDTH * 2.0,
+                TERMINAL_ROWS as f32 * super::CELL_HEIGHT * 2.0
+            )
+        );
+    }
+
+    #[test]
+    fn font_sizes_follow_welly_default_proportions() {
+        assert_eq!(
+            super::CHINESE_FONT_SIZE,
+            (super::CELL_HEIGHT * 22.0_f32 / 24.0).round()
+        );
+        assert_eq!(
+            super::ENGLISH_FONT_SIZE,
+            (super::CELL_HEIGHT * 18.0_f32 / 24.0).round()
+        );
+    }
+
+    #[test]
+    fn default_colors_reverse_to_visible_black_on_light_background() {
+        let cell = crate::cell::Cell {
+            reverse: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            super::cell_foreground_color(&cell),
+            egui::Color32::BLACK
+        );
+        assert_eq!(
+            super::cell_background_color(&cell),
+            egui::Color32::from_rgb(229, 229, 229)
+        );
+    }
+}
+
+fn render_terminal(ui: &mut egui::Ui, terminal: &Arc<Mutex<Terminal>>) {
+    let term = terminal.lock().unwrap();
+    let available_size = ui.available_size();
+    let render_scale = terminal_render_scale(available_size.x, available_size.y, term.cols, term.rows);
+    let cell_width = CELL_WIDTH * render_scale;
+    let cell_height = CELL_HEIGHT * render_scale;
+    let total_width = term.cols as f32 * cell_width;
+    let total_height = term.rows as f32 * cell_height;
+
+    let (response, painter) = ui.allocate_painter(available_size, egui::Sense::hover());
+    let terminal_rect =
+        egui::Rect::from_min_size(response.rect.min, egui::vec2(total_width, total_height));
+    paint_terminal(
+        &term,
+        terminal_rect,
+        response.rect,
+        painter,
+        cell_width,
+        cell_height,
+        render_scale,
+    );
+
+    drop(term);
+}
+
+fn paint_terminal(
+    term: &Terminal,
+    rect: egui::Rect,
+    canvas_rect: egui::Rect,
+    painter: egui::Painter,
+    cell_width: f32,
+    cell_height: f32,
+    render_scale: f32,
+) {
+    painter.rect_filled(canvas_rect, 0.0, egui::Color32::BLACK);
+    paint_terminal_edge_bleed(term, rect, canvas_rect, &painter, cell_width, cell_height);
+
+    for row in 0..term.rows {
+        for col in 0..term.cols {
+            let cell = &term.grid[row][col];
+            if cell.width == 0 {
+                continue;
+            }
+
+            let x = rect.min.x + col as f32 * cell_width;
+            let y = rect.min.y + row as f32 * cell_height;
+
+            let bg_color = cell_background_color(cell);
+
+            if cell.bg_color != cell::Color::Default || cell.reverse {
+                let bg_width = cell_width * cell.width as f32;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(bg_width, cell_height),
+                    ),
+                    0.0,
+                    bg_color,
+                );
+            }
+
+            let fg_color = cell_foreground_color(cell);
+
+            let cell_rect = egui::Rect::from_min_size(
+                egui::pos2(x, y),
+                egui::vec2(cell_width * cell.width as f32, cell_height),
+            );
+            if draw_welly_box_char(&painter, cell_rect, cell.ch, fg_color, cell_width) {
+                continue;
+            }
+
+            let (font_size, font_family, x_offset, y_offset) = if cell.width > 1 {
+                (
+                    CHINESE_FONT_SIZE * render_scale,
+                    FontFamily::Name(CHINESE_FONT_NAME.into()),
+                    CHINESE_LEFT_MARGIN * render_scale,
+                    CHINESE_BOTTOM_MARGIN * render_scale,
+                )
+            } else {
+                (
+                    ENGLISH_FONT_SIZE * render_scale,
+                    FontFamily::Name(ENGLISH_FONT_NAME.into()),
+                    ENGLISH_LEFT_MARGIN * render_scale,
+                    ENGLISH_BOTTOM_MARGIN * render_scale,
+                )
+            };
+            painter.text(
+                egui::pos2(x + x_offset, y + cell_height - y_offset),
+                egui::Align2::LEFT_BOTTOM,
+                cell.ch.to_string(),
+                egui::FontId::new(font_size, font_family),
+                fg_color,
+            );
+        }
+    }
+
+    let cursor_col = term.cursor_col.min(term.cols.saturating_sub(1));
+    let cursor_cell = &term.grid[term.cursor_row][cursor_col];
+    let cursor_width = if cursor_cell.width > 1 {
+        cursor_cell.width
+    } else {
+        1
+    };
+    let cursor_x = rect.min.x + cursor_col as f32 * cell_width;
+    let cursor_y = rect.min.y + term.cursor_row as f32 * cell_height;
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(cursor_x, cursor_y),
+            egui::vec2(cell_width * cursor_width as f32, cell_height),
+        ),
+        0.0,
+        egui::Color32::from_rgb(200, 200, 200),
+    );
+}
+
+fn paint_terminal_edge_bleed(
+    term: &Terminal,
+    terminal_rect: egui::Rect,
+    canvas_rect: egui::Rect,
+    painter: &egui::Painter,
+    cell_width: f32,
+    cell_height: f32,
+) {
+    if terminal_rect.right() < canvas_rect.right() {
+        for row in 0..term.rows {
+            let cell = visible_cell_at(&term.grid[row], term.cols.saturating_sub(1));
+            let color = cell_background_color(cell);
+
+            let top = terminal_rect.top() + row as f32 * cell_height;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(terminal_rect.right(), top),
+                    egui::pos2(canvas_rect.right(), top + cell_height),
+                ),
+                0.0,
+                color,
+            );
+        }
+    }
+
+    if terminal_rect.bottom() < canvas_rect.bottom() {
+        let row = term.rows.saturating_sub(1);
+        for col in 0..term.cols {
+            let cell = visible_cell_at(&term.grid[row], col);
+            let color = cell_background_color(cell);
+
+            let left = terminal_rect.left() + col as f32 * cell_width;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(left, terminal_rect.bottom()),
+                    egui::pos2(left + cell_width, canvas_rect.bottom()),
+                ),
+                0.0,
+                color,
+            );
+        }
+
+        let cell = visible_cell_at(&term.grid[row], term.cols.saturating_sub(1));
+        let color = cell_background_color(cell);
+        painter.rect_filled(
+            egui::Rect::from_min_max(terminal_rect.right_bottom(), canvas_rect.right_bottom()),
+            0.0,
+            color,
+        );
+    }
+}
+
+fn visible_cell_at(row: &[cell::Cell], col: usize) -> &cell::Cell {
+    if row[col].width != 0 || col == 0 {
+        &row[col]
+    } else {
+        &row[col - 1]
+    }
+}
+
+fn cell_background_color(cell: &cell::Cell) -> egui::Color32 {
+    if cell.reverse {
+        foreground_color(cell.fg_color)
+    } else {
+        background_color(cell.bg_color)
+    }
+}
+
+fn cell_foreground_color(cell: &cell::Cell) -> egui::Color32 {
+    if cell.reverse {
+        background_color(cell.bg_color)
+    } else {
+        foreground_color(cell.fg_color)
+    }
+}
+
+fn foreground_color(color: cell::Color) -> egui::Color32 {
+    match color {
+        cell::Color::Default => cell::Color::White.to_egui_color(),
+        _ => color.to_egui_color(),
+    }
+}
+
+fn background_color(color: cell::Color) -> egui::Color32 {
+    match color {
+        cell::Color::Default => egui::Color32::BLACK,
+        _ => color.to_egui_color(),
+    }
+}
+
+fn terminal_render_scale(
+    available_width: f32,
+    available_height: f32,
+    cols: usize,
+    rows: usize,
+) -> f32 {
+    let base_width = cols as f32 * CELL_WIDTH;
+    let base_height = rows as f32 * CELL_HEIGHT;
+    let fit_scale = (available_width / base_width).min(available_height / base_height);
+    fit_scale.clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
+fn draw_welly_box_char(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ch: char,
+    color: egui::Color32,
+    cell_width: f32,
+) -> bool {
+    let stroke_width = (cell_width / 6.0).round().max(1.0);
+    let half_stroke = stroke_width / 2.0;
+    let center_x = rect.center().x;
+    let center_y = rect.center().y;
+
+    let horizontal = |left: f32, right: f32| {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(left, center_y - half_stroke),
+                egui::pos2(right, center_y + half_stroke),
+            ),
+            0.0,
+            color,
+        );
+    };
+
+    let vertical = |top: f32, bottom: f32| {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(center_x - half_stroke, top),
+                egui::pos2(center_x + half_stroke, bottom),
+            ),
+            0.0,
+            color,
+        );
+    };
+
+    match ch {
+        '─' => horizontal(rect.left(), rect.right()),
+        '│' => vertical(rect.top(), rect.bottom()),
+        '┌' => {
+            horizontal(center_x, rect.right());
+            vertical(center_y, rect.bottom());
+        }
+        '┐' => {
+            horizontal(rect.left(), center_x);
+            vertical(center_y, rect.bottom());
+        }
+        '└' => {
+            horizontal(center_x, rect.right());
+            vertical(rect.top(), center_y);
+        }
+        '┘' => {
+            horizontal(rect.left(), center_x);
+            vertical(rect.top(), center_y);
+        }
+        '├' => {
+            horizontal(center_x, rect.right());
+            vertical(rect.top(), rect.bottom());
+        }
+        '┤' => {
+            horizontal(rect.left(), center_x);
+            vertical(rect.top(), rect.bottom());
+        }
+        '┬' => {
+            horizontal(rect.left(), rect.right());
+            vertical(center_y, rect.bottom());
+        }
+        '┴' => {
+            horizontal(rect.left(), rect.right());
+            vertical(rect.top(), center_y);
+        }
+        '┼' => {
+            horizontal(rect.left(), rect.right());
+            vertical(rect.top(), rect.bottom());
+        }
+        '◆' => {
+            let inset_x = stroke_width;
+            let inset_y = stroke_width;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(center_x, rect.top() + inset_y),
+                    egui::pos2(rect.right() - inset_x, center_y),
+                    egui::pos2(center_x, rect.bottom() - inset_y),
+                    egui::pos2(rect.left() + inset_x, center_y),
+                ],
+                color,
+                egui::Stroke::new(0.0, color),
+            ));
+        }
+        '━' => horizontal(rect.left(), rect.right()),
+        '┃' => vertical(rect.top(), rect.bottom()),
+        '▒' => {
+            let shade = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 120);
+            painter.rect_filled(rect, 0.0, shade);
+        }
+        '█' | '◼' => {
+            painter.rect_filled(rect.shrink2(egui::vec2(1.0, 1.0)), 0.0, color);
+        }
+        '▁'..='▇' => {
+            let levels = (ch as u32 - '▁' as u32 + 1) as f32;
+            let height = rect.height() * levels / 8.0;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.bottom() - height),
+                    rect.right_bottom(),
+                ),
+                0.0,
+                color,
+            );
+        }
+        '▉'..='▏' => {
+            let levels = 8.0 - (ch as u32 - '▉' as u32) as f32;
+            let width = cell_width * levels / 8.0;
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.left_top(), egui::vec2(width, rect.height())),
+                0.0,
+                color,
+            );
+        }
+        '▔' => {
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.left_top(), egui::vec2(cell_width, stroke_width)),
+                0.0,
+                color,
+            );
+        }
+        '▕' => {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.right() - stroke_width, rect.top()),
+                    rect.right_bottom(),
+                ),
+                0.0,
+                color,
+            );
+        }
+        '◢' => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![rect.left_bottom(), rect.right_bottom(), rect.right_top()],
+                color,
+                egui::Stroke::new(0.0, color),
+            ));
+        }
+        '◣' => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![rect.left_bottom(), rect.right_bottom(), rect.left_top()],
+                color,
+                egui::Stroke::new(0.0, color),
+            ));
+        }
+        '◤' => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![rect.left_top(), rect.right_top(), rect.left_bottom()],
+                color,
+                egui::Stroke::new(0.0, color),
+            ));
+        }
+        '◥' => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![rect.left_top(), rect.right_top(), rect.right_bottom()],
+                color,
+                egui::Stroke::new(0.0, color),
+            ));
+        }
+        '╱' | '／' => {
+            painter.line_segment(
+                [rect.left_bottom(), rect.right_top()],
+                egui::Stroke::new(stroke_width, color),
+            );
+        }
+        '╲' | '﹨' | '＼' => {
+            painter.line_segment(
+                [rect.left_top(), rect.right_bottom()],
+                egui::Stroke::new(stroke_width, color),
+            );
+        }
+        '╳' => {
+            painter.line_segment(
+                [rect.left_bottom(), rect.right_top()],
+                egui::Stroke::new(stroke_width, color),
+            );
+            painter.line_segment(
+                [rect.left_top(), rect.right_bottom()],
+                egui::Stroke::new(stroke_width, color),
+            );
+        }
+        _ => return false,
+    }
+
+    true
+}
