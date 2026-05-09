@@ -1,6 +1,7 @@
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 const CELL_WIDTH: f32 = 18.0;
@@ -24,12 +25,14 @@ const CHINESE_FONT_PATH: &str = "/System/Library/Fonts/STHeiti Medium.ttc";
 const CHINESE_FONT_NAME: &str = "stheiti";
 
 mod ansi_parser;
+mod attachment;
 mod cell;
 mod config;
 mod ssh;
 mod terminal;
 
 use ansi_parser::AnsiParser;
+use attachment::{parse_image_attachments, ImageAttachment};
 use config::ConnectionSettings;
 use encoding_rs::GB18030;
 use ssh::SshClient;
@@ -138,6 +141,7 @@ struct App {
     connection_error: Option<String>,
     auto_connect_attempted: bool,
     zoom: f32,
+    selection: Option<Selection>,
     pending_inner_size: Option<egui::Vec2>,
     last_inner_size: Option<egui::Vec2>,
     configured_viewport: bool,
@@ -164,6 +168,7 @@ impl Default for App {
             connection_error: None,
             auto_connect_attempted: false,
             zoom: 1.0,
+            selection: None,
             pending_inner_size: None,
             last_inner_size: None,
             configured_viewport: false,
@@ -209,7 +214,9 @@ impl eframe::App for App {
                     .inner_margin(0.0),
             )
             .show(ctx, |ui| {
-                render_terminal(ui, &self.terminal);
+                let terminal_response = render_terminal(ui, &self.terminal, self.selection);
+                self.handle_terminal_selection(ctx, &terminal_response);
+                self.render_attachment_button(ui);
                 if !self.connected
                     && self.connect_rx.is_none()
                     && (self.settings.username.is_none() || self.connection_error.is_some())
@@ -340,33 +347,111 @@ impl App {
             });
     }
 
+    fn render_attachment_button(&self, ui: &mut egui::Ui) {
+        let attachments = {
+            let terminal = self.terminal.lock().unwrap();
+            parse_image_attachments(&terminal_screen_text(&terminal))
+        };
+        let Some(first_attachment) = attachments.first() else {
+            return;
+        };
+
+        let label = attachment_button_label(first_attachment, attachments.len());
+        egui::Area::new("image_attachment_button".into())
+            .anchor(
+                egui::Align2::RIGHT_BOTTOM,
+                egui::vec2(-12.0, -12.0),
+            )
+            .show(ui.ctx(), |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(210))
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        if ui.button(label).clicked() {
+                            open_image_attachments(&attachments);
+                        }
+                    });
+            });
+    }
+
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
         let events = ctx.input(|i| i.events.clone());
         for event in events {
             match event {
+                egui::Event::Copy => {
+                    self.copy_selection(ctx);
+                }
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    if modifiers.command && key == egui::Key::C && self.copy_selection(ctx) {
+                        continue;
+                    }
+
                     if modifiers.command && key == egui::Key::R {
+                        self.selection = None;
                         self.reconnect(ctx);
                         continue;
                     }
 
                     if handle_zoom_shortcut(&mut self.zoom, key, modifiers) {
+                        self.selection = None;
                         self.pending_inner_size = Some(terminal_size_for_zoom(self.zoom));
                         continue;
                     }
 
                     if let Some(bytes) = terminal_event_to_bytes(&event) {
+                        self.selection = None;
                         self.send_bytes(bytes);
                     }
                 }
                 egui::Event::Text(_) | egui::Event::Ime(_) => {
                     if let Some(bytes) = terminal_event_to_bytes(&event) {
+                        self.selection = None;
                         self.send_bytes(bytes);
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    fn handle_terminal_selection(
+        &mut self,
+        ctx: &egui::Context,
+        terminal_response: &TerminalResponse,
+    ) {
+        if terminal_response.response.drag_started() {
+            if let Some(point) = terminal_response.interact_grid_point() {
+                self.selection = Some(Selection::new(point));
+            }
+        } else if terminal_response.response.dragged() {
+            if let (Some(selection), Some(point)) =
+                (&mut self.selection, terminal_response.interact_grid_point())
+            {
+                selection.end = point;
+            }
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::C) && input.modifiers.command) {
+            self.copy_selection(ctx);
+        }
+    }
+
+    fn copy_selection(&self, ctx: &egui::Context) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+
+        let text = {
+            let terminal = self.terminal.lock().unwrap();
+            selected_text(&terminal, selection)
+        };
+
+        if text.is_empty() {
+            return false;
+        }
+
+        ctx.copy_text(text);
+        true
     }
 
     fn send_bytes(&self, bytes: Vec<u8>) {
@@ -410,6 +495,128 @@ impl App {
             self.last_inner_size = Some(target_size);
         }
     }
+}
+
+fn attachment_button_label(attachment: &ImageAttachment, count: usize) -> String {
+    if count > 1 {
+        format!("打开 {count} 张图")
+    } else {
+        format!("打开 {}", attachment.filename)
+    }
+}
+
+fn open_image_attachments(attachments: &[ImageAttachment]) {
+    for attachment in attachments {
+        if let Err(error) = Command::new("open").arg(&attachment.image_url).spawn() {
+            log::error!("Failed to open image attachment {}: {}", attachment.image_url, error);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GridPoint {
+    row: usize,
+    col: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    start: GridPoint,
+    end: GridPoint,
+}
+
+impl Selection {
+    fn new(point: GridPoint) -> Self {
+        Self {
+            start: point,
+            end: point,
+        }
+    }
+
+    fn normalized(self) -> (GridPoint, GridPoint) {
+        if grid_index(self.start) <= grid_index(self.end) {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
+
+fn grid_index(point: GridPoint) -> usize {
+    point.row * TERMINAL_COLS + point.col
+}
+
+struct TerminalResponse {
+    response: egui::Response,
+    rect: egui::Rect,
+    cell_width: f32,
+    cell_height: f32,
+    rows: usize,
+    cols: usize,
+}
+
+impl TerminalResponse {
+    fn interact_grid_point(&self) -> Option<GridPoint> {
+        let pos = self.response.interact_pointer_pos()?;
+        pos_to_grid_point(pos, self.rect, self.cell_width, self.cell_height, self.rows, self.cols)
+    }
+}
+
+fn pos_to_grid_point(
+    pos: egui::Pos2,
+    rect: egui::Rect,
+    cell_width: f32,
+    cell_height: f32,
+    rows: usize,
+    cols: usize,
+) -> Option<GridPoint> {
+    if !rect.contains(pos) {
+        return None;
+    }
+
+    let col = ((pos.x - rect.min.x) / cell_width).floor() as usize;
+    let row = ((pos.y - rect.min.y) / cell_height).floor() as usize;
+    Some(GridPoint {
+        row: row.min(rows.saturating_sub(1)),
+        col: col.min(cols.saturating_sub(1)),
+    })
+}
+
+fn selected_text(term: &Terminal, selection: Selection) -> String {
+    let (start, end) = selection.normalized();
+    let mut lines = Vec::new();
+
+    for row in start.row..=end.row {
+        let start_col = if row == start.row { start.col } else { 0 };
+        let end_col = if row == end.row {
+            end.col
+        } else {
+            term.cols.saturating_sub(1)
+        };
+
+        let mut line = String::new();
+        for col in start_col..=end_col.min(term.cols.saturating_sub(1)) {
+            let cell = &term.grid[row][col];
+            if cell.width == 0 {
+                continue;
+            }
+            line.push(cell.ch);
+        }
+        lines.push(line.trim_end().to_owned());
+    }
+
+    lines.join("\n")
+}
+
+fn terminal_screen_text(term: &Terminal) -> String {
+    let selection = Selection {
+        start: GridPoint { row: 0, col: 0 },
+        end: GridPoint {
+            row: term.rows.saturating_sub(1),
+            col: term.cols.saturating_sub(1),
+        },
+    };
+    selected_text(term, selection)
 }
 
 fn terminal_event_to_bytes(event: &egui::Event) -> Option<Vec<u8>> {
@@ -557,10 +764,11 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_zoom_shortcut, key_event_to_bytes, terminal_aspect_fit_size,
-        terminal_event_to_bytes, terminal_render_scale, terminal_size_for_zoom, TERMINAL_COLS,
-        TERMINAL_ROWS,
+        handle_zoom_shortcut, key_event_to_bytes, selected_text, terminal_aspect_fit_size,
+        terminal_event_to_bytes, terminal_render_scale, terminal_size_for_zoom, GridPoint,
+        Selection, TERMINAL_COLS, TERMINAL_ROWS,
     };
+    use crate::terminal::Terminal;
 
     #[test]
     fn control_letter_sends_ascii_control_code() {
@@ -668,6 +876,21 @@ mod tests {
     }
 
     #[test]
+    fn attachment_button_label_opens_all_detected_images() {
+        let attachment = crate::attachment::ImageAttachment {
+            filename: "first.png".to_owned(),
+            size: "12 KB".to_owned(),
+            image_url: "https://www.newsmth.net/att.php?first.png".to_owned(),
+            article_url: None,
+        };
+
+        assert_eq!(
+            super::attachment_button_label(&attachment, 3),
+            "打开 3 张图"
+        );
+    }
+
+    #[test]
     fn ime_commit_sends_committed_text() {
         let event = egui::Event::Ime(egui::ImeEvent::Commit("中文".to_owned()));
 
@@ -702,9 +925,71 @@ mod tests {
             egui::Color32::from_rgb(229, 229, 229)
         );
     }
+
+    #[test]
+    fn selection_extracts_single_line_text() {
+        let mut terminal = Terminal::new(2, 8);
+        put_ascii(&mut terminal, 0, 0, "hello");
+
+        let text = selected_text(
+            &terminal,
+            Selection {
+                start: GridPoint { row: 0, col: 1 },
+                end: GridPoint { row: 0, col: 3 },
+            },
+        );
+
+        assert_eq!(text, "ell");
+    }
+
+    #[test]
+    fn selection_extracts_multiline_text_and_trims_right_spaces() {
+        let mut terminal = Terminal::new(3, 8);
+        put_ascii(&mut terminal, 0, 0, "ab  ");
+        put_ascii(&mut terminal, 1, 0, "cd  ");
+
+        let text = selected_text(
+            &terminal,
+            Selection {
+                start: GridPoint { row: 0, col: 0 },
+                end: GridPoint { row: 1, col: 3 },
+            },
+        );
+
+        assert_eq!(text, "ab\ncd");
+    }
+
+    #[test]
+    fn selection_skips_double_width_continuation_cells() {
+        let mut terminal = Terminal::new(1, 8);
+        terminal.set_cursor(0, 0);
+        terminal.put_char('中');
+        terminal.put_char('A');
+
+        let text = selected_text(
+            &terminal,
+            Selection {
+                start: GridPoint { row: 0, col: 0 },
+                end: GridPoint { row: 0, col: 2 },
+            },
+        );
+
+        assert_eq!(text, "中A");
+    }
+
+    fn put_ascii(terminal: &mut Terminal, row: usize, col: usize, text: &str) {
+        terminal.set_cursor(row, col);
+        for ch in text.chars() {
+            terminal.put_char(ch);
+        }
+    }
 }
 
-fn render_terminal(ui: &mut egui::Ui, terminal: &Arc<Mutex<Terminal>>) {
+fn render_terminal(
+    ui: &mut egui::Ui,
+    terminal: &Arc<Mutex<Terminal>>,
+    selection: Option<Selection>,
+) -> TerminalResponse {
     let term = terminal.lock().unwrap();
     let available_size = ui.available_size();
     let render_scale = terminal_render_scale(available_size.x, available_size.y, term.cols, term.rows);
@@ -713,7 +998,7 @@ fn render_terminal(ui: &mut egui::Ui, terminal: &Arc<Mutex<Terminal>>) {
     let total_width = term.cols as f32 * cell_width;
     let total_height = term.rows as f32 * cell_height;
 
-    let (response, painter) = ui.allocate_painter(available_size, egui::Sense::click());
+    let (response, painter) = ui.allocate_painter(available_size, egui::Sense::click_and_drag());
     if response.clicked() || !response.ctx.wants_keyboard_input() {
         response.request_focus();
     }
@@ -739,13 +1024,51 @@ fn render_terminal(ui: &mut egui::Ui, terminal: &Arc<Mutex<Terminal>>) {
         &term,
         terminal_rect,
         response.rect,
-        painter,
+        painter.clone(),
         cell_width,
         cell_height,
         render_scale,
+        selection,
     );
 
     drop(term);
+    TerminalResponse {
+        response,
+        rect: terminal_rect,
+        cell_width,
+        cell_height,
+        rows: TERMINAL_ROWS,
+        cols: TERMINAL_COLS,
+    }
+}
+
+fn paint_selection(
+    term: &Terminal,
+    selection: Selection,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+    cell_width: f32,
+    cell_height: f32,
+) {
+    let (start, end) = selection.normalized();
+    let color = egui::Color32::from_rgba_premultiplied(120, 170, 255, 90);
+
+    for row in start.row..=end.row.min(term.rows.saturating_sub(1)) {
+        let start_col = if row == start.row { start.col } else { 0 };
+        let end_col = if row == end.row {
+            end.col
+        } else {
+            term.cols.saturating_sub(1)
+        };
+        let left = rect.min.x + start_col as f32 * cell_width;
+        let top = rect.min.y + row as f32 * cell_height;
+        let width = (end_col.saturating_sub(start_col) + 1) as f32 * cell_width;
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, cell_height)),
+            0.0,
+            color,
+        );
+    }
 }
 
 fn paint_terminal(
@@ -756,9 +1079,13 @@ fn paint_terminal(
     cell_width: f32,
     cell_height: f32,
     render_scale: f32,
+    selection: Option<Selection>,
 ) {
     painter.rect_filled(canvas_rect, 0.0, egui::Color32::BLACK);
     paint_terminal_edge_bleed(term, rect, canvas_rect, &painter, cell_width, cell_height);
+    if let Some(selection) = selection {
+        paint_selection(term, selection, rect, &painter, cell_width, cell_height);
+    }
 
     for row in 0..term.rows {
         for col in 0..term.cols {
