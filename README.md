@@ -9,10 +9,12 @@ daily-use path is stable.
 
 ## Motivation
 
-This project is motivated by Welly: its terminal behavior, keyboard habits,
-visual proportions, and long-standing fit for Chinese BBS use. Thanks to Welly
-and its contributors for setting the shape of the experience this project is
-trying to preserve.
+This project is motivated by [Welly](https://github.com/ytang/welly): its
+terminal behavior, keyboard habits, visual proportions, and long-standing fit
+for Chinese BBS use. The goal is to preserve that experience while making it
+available consistently across macOS, Windows, and Linux. Thanks to Welly and its
+contributors for setting the shape of the experience this project is trying to
+preserve.
 
 ## Current Status
 
