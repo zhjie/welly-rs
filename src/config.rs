@@ -79,7 +79,10 @@ fn find_ssh_host_block<'a>(contents: &'a str, host: &str) -> Option<&'a str> {
         }
 
         let patterns = line_body[4..].split_whitespace();
-        if patterns.into_iter().any(|pattern| ssh_host_pattern_matches(pattern, host)) {
+        if patterns
+            .into_iter()
+            .any(|pattern| ssh_host_pattern_matches(pattern, host))
+        {
             matching_start = Some(line_start);
             block_start = line_start + line.len();
             if contents.as_bytes().get(block_start) == Some(&b'\n') {

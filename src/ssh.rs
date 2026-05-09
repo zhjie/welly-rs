@@ -2,6 +2,7 @@ use crate::ansi_parser::AnsiParser;
 use crate::config::ConnectionSettings;
 use crate::terminal::Terminal;
 use russh::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ pub struct SshClient {
     session: Arc<tokio::sync::Mutex<client::Handle<Client>>>,
     channel_id: ChannelId,
     last_send_at: Arc<Mutex<Instant>>,
+    connected: Arc<AtomicBool>,
 }
 
 impl SshClient {
@@ -29,7 +31,8 @@ impl SshClient {
         let config = Arc::new(config);
         let sh = Client {};
 
-        let mut session = client::connect(config, (settings.host.as_str(), settings.port), sh).await?;
+        let mut session =
+            client::connect(config, (settings.host.as_str(), settings.port), sh).await?;
         authenticate(&mut session, &settings).await?;
 
         let mut channel = session.channel_open_session().await?;
@@ -39,14 +42,18 @@ impl SshClient {
             session: Arc::new(tokio::sync::Mutex::new(session)),
             channel_id,
             last_send_at: Arc::new(Mutex::new(Instant::now())),
+            connected: Arc::new(AtomicBool::new(true)),
         };
 
         let client_arc = Arc::new(client);
         client_arc.start_anti_idle_loop();
 
-        channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await?;
+        channel
+            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+            .await?;
         channel.request_shell(true).await?;
 
+        let connected = Arc::clone(&client_arc.connected);
         tokio::spawn(async move {
             log::info!("Starting SSH data receive loop");
             loop {
@@ -84,19 +91,32 @@ impl SshClient {
                     _ => {}
                 }
             }
+            connected.store(false, Ordering::SeqCst);
         });
 
         Ok(client_arc)
     }
 
     pub async fn send_data(&self, data: &[u8]) -> Result<(), russh::Error> {
+        if !self.is_connected() {
+            return Err(russh::Error::Disconnect);
+        }
+
         let session = self.session.lock().await;
-        session
+        let result = session
             .data(self.channel_id, bytes::Bytes::copy_from_slice(data))
             .await
-            .map_err(|_| russh::Error::SendError)?;
+            .map_err(|_| russh::Error::SendError);
+        if result.is_err() {
+            self.connected.store(false, Ordering::SeqCst);
+        }
+        result?;
         *self.last_send_at.lock().unwrap() = Instant::now();
         Ok(())
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
     }
 
     fn start_anti_idle_loop(self: &Arc<Self>) {
@@ -105,9 +125,12 @@ impl SshClient {
             let mut interval = tokio::time::interval(ANTI_IDLE_CHECK_INTERVAL);
             loop {
                 interval.tick().await;
+                if !client.is_connected() {
+                    break;
+                }
                 if client.should_send_anti_idle(Instant::now()) {
                     if let Err(e) = client.send_data(&ANTI_IDLE_PAYLOAD).await {
-                        log::error!("Anti-idle send error: {}", e);
+                        log::debug!("Anti-idle stopped after SSH channel ended: {}", e);
                         break;
                     }
                 }
@@ -118,6 +141,10 @@ impl SshClient {
     fn should_send_anti_idle(&self, now: Instant) -> bool {
         anti_idle_due(*self.last_send_at.lock().unwrap(), now)
     }
+}
+
+pub fn is_channel_closed_error(error: &russh::Error) -> bool {
+    matches!(error, russh::Error::Disconnect | russh::Error::SendError)
 }
 
 fn anti_idle_due(last_send_at: Instant, now: Instant) -> bool {
@@ -186,7 +213,10 @@ mod tests {
     fn anti_idle_fires_after_welly_idle_window() {
         let last_send = Instant::now();
 
-        assert!(anti_idle_due(last_send, last_send + Duration::from_secs(59)));
+        assert!(anti_idle_due(
+            last_send,
+            last_send + Duration::from_secs(59)
+        ));
     }
 }
 

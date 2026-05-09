@@ -9,9 +9,9 @@ const CELL_HEIGHT: f32 = 35.0;
 const CHINESE_FONT_SIZE: f32 = 32.0;
 const ENGLISH_FONT_SIZE: f32 = 26.0;
 const CHINESE_LEFT_MARGIN: f32 = 1.0;
-const CHINESE_BOTTOM_MARGIN: f32 = 1.0;
+const CHINESE_TOP_MARGIN: f32 = 1.0;
 const ENGLISH_LEFT_MARGIN: f32 = 1.0;
-const ENGLISH_BOTTOM_MARGIN: f32 = 2.0;
+const ENGLISH_TOP_MARGIN: f32 = 1.0;
 const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 3.0;
 const ZOOM_STEP: f32 = 1.05;
@@ -35,7 +35,7 @@ use ansi_parser::AnsiParser;
 use attachment::{parse_image_attachments, ImageAttachment};
 use config::ConnectionSettings;
 use encoding_rs::GB18030;
-use ssh::SshClient;
+use ssh::{is_channel_closed_error, SshClient};
 use terminal::Terminal;
 
 fn main() -> eframe::Result {
@@ -255,7 +255,10 @@ impl App {
         let parser = Arc::clone(&self.parser);
         let settings = self.settings.clone();
         let ctx = ctx.clone();
-        let (tx, rx): (Sender<Result<Arc<SshClient>, String>>, Receiver<Result<Arc<SshClient>, String>>) = crossbeam_channel::bounded(1);
+        let (tx, rx): (
+            Sender<Result<Arc<SshClient>, String>>,
+            Receiver<Result<Arc<SshClient>, String>>,
+        ) = crossbeam_channel::bounded(1);
         self.connect_rx = Some(rx);
 
         std::thread::spawn(move || {
@@ -309,7 +312,9 @@ impl App {
                         });
                         ui.horizontal(|ui| {
                             ui.label("Pass");
-                            ui.add(egui::TextEdit::singleline(&mut self.login_password).password(true));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.login_password).password(true),
+                            );
                         });
 
                         if let Some(error) = &self.connection_error {
@@ -358,10 +363,7 @@ impl App {
 
         let label = attachment_button_label(first_attachment, attachments.len());
         egui::Area::new("image_attachment_button".into())
-            .anchor(
-                egui::Align2::RIGHT_BOTTOM,
-                egui::vec2(-12.0, -12.0),
-            )
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::none()
                     .fill(egui::Color32::from_black_alpha(210))
@@ -381,7 +383,12 @@ impl App {
                 egui::Event::Copy => {
                     self.copy_selection(ctx);
                 }
-                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
                     if modifiers.command && key == egui::Key::C && self.copy_selection(ctx) {
                         continue;
                     }
@@ -456,12 +463,20 @@ impl App {
 
     fn send_bytes(&self, bytes: Vec<u8>) {
         if let Some(client) = &self.ssh_client {
+            if !client.is_connected() {
+                return;
+            }
+
             let client = Arc::clone(client);
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
                     if let Err(e) = client.send_data(&bytes).await {
-                        log::error!("Send error: {}", e);
+                        if is_channel_closed_error(&e) {
+                            log::debug!("Ignoring send after SSH channel ended: {}", e);
+                        } else {
+                            log::error!("Send error: {}", e);
+                        }
                     }
                 });
             });
@@ -508,7 +523,11 @@ fn attachment_button_label(attachment: &ImageAttachment, count: usize) -> String
 fn open_image_attachments(attachments: &[ImageAttachment]) {
     for attachment in attachments {
         if let Err(error) = Command::new("open").arg(&attachment.image_url).spawn() {
-            log::error!("Failed to open image attachment {}: {}", attachment.image_url, error);
+            log::error!(
+                "Failed to open image attachment {}: {}",
+                attachment.image_url,
+                error
+            );
         }
     }
 }
@@ -558,7 +577,14 @@ struct TerminalResponse {
 impl TerminalResponse {
     fn interact_grid_point(&self) -> Option<GridPoint> {
         let pos = self.response.interact_pointer_pos()?;
-        pos_to_grid_point(pos, self.rect, self.cell_width, self.cell_height, self.rows, self.cols)
+        pos_to_grid_point(
+            pos,
+            self.rect,
+            self.cell_width,
+            self.cell_height,
+            self.rows,
+            self.cols,
+        )
     }
 }
 
@@ -834,18 +860,21 @@ mod tests {
         let base_width = TERMINAL_COLS as f32 * super::CELL_WIDTH;
         let base_height = TERMINAL_ROWS as f32 * super::CELL_HEIGHT;
 
-        assert!((terminal_render_scale(base_width, base_height, TERMINAL_COLS, TERMINAL_ROWS)
-            - 1.0)
-            .abs()
-            < f32::EPSILON);
-        assert!((terminal_render_scale(
-            base_width * 2.0,
-            base_height * 2.0,
-            TERMINAL_COLS,
-            TERMINAL_ROWS
-        ) - 2.0)
-            .abs()
-            < f32::EPSILON);
+        assert!(
+            (terminal_render_scale(base_width, base_height, TERMINAL_COLS, TERMINAL_ROWS) - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (terminal_render_scale(
+                base_width * 2.0,
+                base_height * 2.0,
+                TERMINAL_COLS,
+                TERMINAL_ROWS
+            ) - 2.0)
+                .abs()
+                < f32::EPSILON
+        );
         assert_eq!(
             terminal_render_scale(1.0, 1.0, TERMINAL_COLS, TERMINAL_ROWS),
             super::MIN_ZOOM
@@ -894,7 +923,10 @@ mod tests {
     fn ime_commit_sends_committed_text() {
         let event = egui::Event::Ime(egui::ImeEvent::Commit("中文".to_owned()));
 
-        assert_eq!(terminal_event_to_bytes(&event), Some(vec![0xd6, 0xd0, 0xce, 0xc4]));
+        assert_eq!(
+            terminal_event_to_bytes(&event),
+            Some(vec![0xd6, 0xd0, 0xce, 0xc4])
+        );
     }
 
     #[test]
@@ -910,16 +942,36 @@ mod tests {
     }
 
     #[test]
+    fn text_position_uses_cell_top_margin() {
+        let chinese = crate::cell::Cell {
+            ch: '在',
+            width: 2,
+            ..Default::default()
+        };
+        let english = crate::cell::Cell {
+            ch: '9',
+            width: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            super::text_paint_position(10.0, 20.0, 1.0, &chinese).y,
+            20.0 + super::CHINESE_TOP_MARGIN
+        );
+        assert_eq!(
+            super::text_paint_position(10.0, 20.0, 1.0, &english).y,
+            20.0 + super::ENGLISH_TOP_MARGIN
+        );
+    }
+
+    #[test]
     fn default_colors_reverse_to_visible_black_on_light_background() {
         let cell = crate::cell::Cell {
             reverse: true,
             ..Default::default()
         };
 
-        assert_eq!(
-            super::cell_foreground_color(&cell),
-            egui::Color32::BLACK
-        );
+        assert_eq!(super::cell_foreground_color(&cell), egui::Color32::BLACK);
         assert_eq!(
             super::cell_background_color(&cell),
             egui::Color32::from_rgb(229, 229, 229)
@@ -992,7 +1044,8 @@ fn render_terminal(
 ) -> TerminalResponse {
     let term = terminal.lock().unwrap();
     let available_size = ui.available_size();
-    let render_scale = terminal_render_scale(available_size.x, available_size.y, term.cols, term.rows);
+    let render_scale =
+        terminal_render_scale(available_size.x, available_size.y, term.cols, term.rows);
     let cell_width = CELL_WIDTH * render_scale;
     let cell_height = CELL_HEIGHT * render_scale;
     let total_width = term.cols as f32 * cell_width;
@@ -1102,10 +1155,7 @@ fn paint_terminal(
             if cell.bg_color != cell::Color::Default || cell.reverse {
                 let bg_width = cell_width * cell.width as f32;
                 painter.rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(x, y),
-                        egui::vec2(bg_width, cell_height),
-                    ),
+                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bg_width, cell_height)),
                     0.0,
                     bg_color,
                 );
@@ -1121,24 +1171,20 @@ fn paint_terminal(
                 continue;
             }
 
-            let (font_size, font_family, x_offset, y_offset) = if cell.width > 1 {
+            let (font_size, font_family) = if cell.width > 1 {
                 (
                     CHINESE_FONT_SIZE * render_scale,
                     FontFamily::Name(CHINESE_FONT_NAME.into()),
-                    CHINESE_LEFT_MARGIN * render_scale,
-                    CHINESE_BOTTOM_MARGIN * render_scale,
                 )
             } else {
                 (
                     ENGLISH_FONT_SIZE * render_scale,
                     FontFamily::Name(ENGLISH_FONT_NAME.into()),
-                    ENGLISH_LEFT_MARGIN * render_scale,
-                    ENGLISH_BOTTOM_MARGIN * render_scale,
                 )
             };
             painter.text(
-                egui::pos2(x + x_offset, y + cell_height - y_offset),
-                egui::Align2::LEFT_BOTTOM,
+                text_paint_position(x, y, render_scale, cell),
+                egui::Align2::LEFT_TOP,
                 cell.ch.to_string(),
                 egui::FontId::new(font_size, font_family),
                 fg_color,
@@ -1163,6 +1209,16 @@ fn paint_terminal(
         0.0,
         egui::Color32::from_rgb(200, 200, 200),
     );
+}
+
+fn text_paint_position(x: f32, y: f32, render_scale: f32, cell: &cell::Cell) -> egui::Pos2 {
+    let (x_offset, y_offset) = if cell.width > 1 {
+        (CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN)
+    } else {
+        (ENGLISH_LEFT_MARGIN, ENGLISH_TOP_MARGIN)
+    };
+
+    egui::pos2(x + x_offset * render_scale, y + y_offset * render_scale)
 }
 
 fn paint_terminal_edge_bleed(

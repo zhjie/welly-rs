@@ -136,7 +136,10 @@ https://www.newsmth.net/att.php?second.jpg
 
         assert_eq!(attachments.len(), 2);
         assert_eq!(attachments[0].filename, "first.png");
-        assert_eq!(attachments[0].image_url, "https://www.newsmth.net/att.php?first.png");
+        assert_eq!(
+            attachments[0].image_url,
+            "https://www.newsmth.net/att.php?first.png"
+        );
         assert_eq!(attachments[1].filename, "second.jpg");
         assert_eq!(attachments[1].size, "3 MB");
         assert_eq!(

@@ -73,19 +73,13 @@ impl Terminal {
         let row = self.cursor_row;
         match mode {
             ClearLineMode::FromCursor => {
-                for col in self.cursor_col..self.cols {
-                    self.grid[row][col] = Cell::default();
-                }
+                self.clear_cell_range(row, self.cursor_col, self.cols);
             }
             ClearLineMode::ToCursor => {
-                for col in 0..=self.cursor_col {
-                    self.grid[row][col] = Cell::default();
-                }
+                self.clear_cell_range(row, 0, self.cursor_col.saturating_add(1));
             }
             ClearLineMode::All => {
-                for col in 0..self.cols {
-                    self.grid[row][col] = Cell::default();
-                }
+                self.clear_cell_range(row, 0, self.cols);
             }
         }
         self.dirty = true;
@@ -94,24 +88,16 @@ impl Terminal {
     pub fn clear_screen(&mut self, mode: ClearScreenMode) {
         match mode {
             ClearScreenMode::FromCursor => {
-                for col in self.cursor_col..self.cols {
-                    self.grid[self.cursor_row][col] = Cell::default();
-                }
+                self.clear_cell_range(self.cursor_row, self.cursor_col, self.cols);
                 for row in (self.cursor_row + 1)..self.rows {
-                    for col in 0..self.cols {
-                        self.grid[row][col] = Cell::default();
-                    }
+                    self.clear_cell_range(row, 0, self.cols);
                 }
             }
             ClearScreenMode::ToCursor => {
                 for row in 0..self.cursor_row {
-                    for col in 0..self.cols {
-                        self.grid[row][col] = Cell::default();
-                    }
+                    self.clear_cell_range(row, 0, self.cols);
                 }
-                for col in 0..=self.cursor_col {
-                    self.grid[self.cursor_row][col] = Cell::default();
-                }
+                self.clear_cell_range(self.cursor_row, 0, self.cursor_col.saturating_add(1));
             }
             ClearScreenMode::All => {
                 self.clear_all();
@@ -150,30 +136,8 @@ impl Terminal {
         } else {
             let row = self.cursor_row;
             let col = self.cursor_col;
-            self.grid[row][col] = Cell {
-                ch,
-                width,
-                fg_color: self.fg_color,
-                bg_color: self.bg_color,
-                bold: self.bold,
-                underline: self.underline,
-                blink: self.blink,
-                reverse: self.reverse,
-            };
-            for i in 1..width as usize {
-                if col + i < self.cols {
-                    self.grid[row][col + i] = Cell {
-                        ch: '\0',
-                        width: 0,
-                        fg_color: self.fg_color,
-                        bg_color: self.bg_color,
-                        bold: self.bold,
-                        underline: self.underline,
-                        blink: self.blink,
-                        reverse: self.reverse,
-                    };
-                }
-            }
+            self.clear_cell_range(row, col, col + width as usize);
+            self.write_cell(row, col, ch, width);
             self.advance_cursor(width);
         }
         self.dirty = true;
@@ -182,9 +146,23 @@ impl Terminal {
     pub fn insert_char(&mut self, ch: char, width: u8) {
         let row = self.cursor_row;
         let col = self.cursor_col;
-        for c in (col..(self.cols - 1)).rev() {
-            self.grid[row][c + 1] = self.grid[row][c];
+        let width = width as usize;
+        if col + width > self.cols {
+            return;
         }
+
+        for c in (col..(self.cols - width)).rev() {
+            self.grid[row][c + width] = self.grid[row][c];
+        }
+        for c in col..(col + width) {
+            self.grid[row][c] = Cell::default();
+        }
+        self.write_cell(row, col, ch, width as u8);
+        self.sanitize_row(row);
+        self.advance_cursor(width as u8);
+    }
+
+    fn write_cell(&mut self, row: usize, col: usize, ch: char, width: u8) {
         self.grid[row][col] = Cell {
             ch,
             width,
@@ -195,7 +173,65 @@ impl Terminal {
             blink: self.blink,
             reverse: self.reverse,
         };
-        self.advance_cursor(width);
+        for i in 1..width as usize {
+            if col + i < self.cols {
+                self.grid[row][col + i] = Cell {
+                    ch: '\0',
+                    width: 0,
+                    fg_color: self.fg_color,
+                    bg_color: self.bg_color,
+                    bold: self.bold,
+                    underline: self.underline,
+                    blink: self.blink,
+                    reverse: self.reverse,
+                };
+            }
+        }
+    }
+
+    fn clear_cell_range(&mut self, row: usize, start: usize, end: usize) {
+        let (start, end) = self.expand_range_for_wide_cells(row, start, end);
+        for col in start..end {
+            self.grid[row][col] = Cell::default();
+        }
+    }
+
+    fn expand_range_for_wide_cells(&self, row: usize, start: usize, end: usize) -> (usize, usize) {
+        let mut start = start.min(self.cols);
+        let mut end = end.min(self.cols);
+
+        if start < end && start > 0 && self.grid[row][start].width == 0 {
+            start -= 1;
+        }
+        if start < end && end < self.cols && self.grid[row][end].width == 0 {
+            end += 1;
+        }
+
+        (start, end)
+    }
+
+    fn sanitize_row(&mut self, row: usize) {
+        let mut col = 0;
+        while col < self.cols {
+            match self.grid[row][col].width {
+                0 => {
+                    if col == 0 || self.grid[row][col - 1].width <= 1 {
+                        self.grid[row][col] = Cell::default();
+                    }
+                    col += 1;
+                }
+                width if width as usize > 1 => {
+                    let end = col + width as usize;
+                    if end > self.cols {
+                        self.grid[row][col] = Cell::default();
+                        col += 1;
+                    } else {
+                        col = end;
+                    }
+                }
+                _ => col += 1,
+            }
+        }
     }
 
     fn advance_cursor(&mut self, width: u8) {
@@ -342,22 +378,23 @@ impl Terminal {
         let row = self.cursor_row;
         let start = self.cursor_col;
         let end = (start + n).min(self.cols);
-        for col in start..end {
-            self.grid[row][col] = Cell::default();
-        }
+        self.clear_cell_range(row, start, end);
         self.dirty = true;
     }
 
     pub fn delete_chars(&mut self, n: usize) {
         let row = self.cursor_row;
         let col = self.cursor_col;
-        let n = n.min(self.cols - col);
+        let end = (col + n).min(self.cols);
+        let (col, end) = self.expand_range_for_wide_cells(row, col, end);
+        let n = end.saturating_sub(col);
         for c in col..(self.cols - n) {
             self.grid[row][c] = self.grid[row][c + n];
         }
         for c in (self.cols - n)..self.cols {
             self.grid[row][c] = Cell::default();
         }
+        self.sanitize_row(row);
         self.dirty = true;
     }
 
@@ -392,7 +429,9 @@ fn char_width(ch: char) -> u8 {
     if is_welly_ascii_art_symbol(ch) {
         2
     } else {
-        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u8
+        unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(1)
+            .max(1) as u8
     }
 }
 
@@ -480,6 +519,34 @@ mod tests {
         assert_eq!(terminal.cursor_col, 4);
         assert_eq!(terminal.grid[0][3].ch, 'd');
         assert_eq!(terminal.grid[2][0].ch, ' ');
+    }
+
+    #[test]
+    fn overwriting_double_width_continuation_clears_leading_cell() {
+        let mut terminal = Terminal::new(1, 4);
+
+        terminal.put_char('表');
+        terminal.set_cursor(0, 1);
+        terminal.put_char('都');
+
+        assert_eq!(terminal.grid[0][0], Default::default());
+        assert_eq!(terminal.grid[0][1].ch, '都');
+        assert_eq!(terminal.grid[0][1].width, 2);
+        assert_eq!(terminal.grid[0][2].ch, '\0');
+        assert_eq!(terminal.grid[0][2].width, 0);
+    }
+
+    #[test]
+    fn overwriting_double_width_leading_cell_clears_continuation() {
+        let mut terminal = Terminal::new(1, 4);
+
+        terminal.put_char('表');
+        terminal.set_cursor(0, 0);
+        terminal.put_char('A');
+
+        assert_eq!(terminal.grid[0][0].ch, 'A');
+        assert_eq!(terminal.grid[0][0].width, 1);
+        assert_eq!(terminal.grid[0][1], Default::default());
     }
 }
 

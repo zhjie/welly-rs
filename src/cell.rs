@@ -77,11 +77,22 @@ impl Color {
         match index {
             0..=15 => {
                 let colors = [
-                    Color::Black, Color::Red, Color::Green, Color::Yellow,
-                    Color::Blue, Color::Magenta, Color::Cyan, Color::White,
-                    Color::BrightBlack, Color::BrightRed, Color::BrightGreen,
-                    Color::BrightYellow, Color::BrightBlue, Color::BrightMagenta,
-                    Color::BrightCyan, Color::BrightWhite,
+                    Color::Black,
+                    Color::Red,
+                    Color::Green,
+                    Color::Yellow,
+                    Color::Blue,
+                    Color::Magenta,
+                    Color::Cyan,
+                    Color::White,
+                    Color::BrightBlack,
+                    Color::BrightRed,
+                    Color::BrightGreen,
+                    Color::BrightYellow,
+                    Color::BrightBlue,
+                    Color::BrightMagenta,
+                    Color::BrightCyan,
+                    Color::BrightWhite,
                 ];
                 colors[index as usize].to_egui_color()
             }
