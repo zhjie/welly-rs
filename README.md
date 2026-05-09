@@ -18,7 +18,7 @@ preserve.
 
 ## Usage
 
-Configure your ShuiMu SSH login in `~/.ssh/config`:
+Configure your SSH login in `~/.ssh/config`:
 
 ```sshconfig
 Host bbs.newsmth.net
