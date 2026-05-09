@@ -41,26 +41,42 @@ cargo run
 - ANSI/CSI parsing for common terminal control sequences.
 - Welly-like 80x24 layout, font metrics, colors, reverse video, and VT100 art.
 - Welly-style keyboard shortcuts for basic navigation.
+- Chinese IME input, mouse selection/copy, anti-idle keepalive, and image attachment opening.
 
 ## Roadmap
 
-1. Test cross-platform compatibility
+1. Test cross-platform compatibility.
 
    Stabilize in this order:
 
    - macOS
    - Windows
-   - Linux
+   - Linux (maybe later)
 
-   Pay special attention to fonts, keyboard modifiers, browser opening,
-   configuration directories, and credential storage differences.
+   Pay special attention to fonts, IME behavior, keyboard modifiers, browser
+   opening, and `~/.ssh/config` / SSH config equivalents.
 
-## Future Ideas
+2. Recognize links and make them clickable.
 
-- Expose a headless Welly-rs backend for alternative frontends, such as an Emacs
-  client. The Rust backend should own SSH, decoding, ANSI parsing, and the
-  Welly-style screen buffer; frontends should only render that buffer and forward
-  input.
+   Image attachments are already detected from article footers. Plain article
+   links and other URLs should share the same hotspot/click path later.
+
+3. Consider a minimal settings UI.
+
+   Keep this optional. The preferred login path is still SSH config plus manual
+   login when no config exists.
+
+4. Consider OS-level credential storage only.
+
+   Do not store passwords in plaintext. If password persistence is ever added,
+   use the operating system keychain/credential manager.
+
+5. Future Ideas
+
+   Expose a headless Welly-rs backend for alternative frontends, such as an Emacs
+   client. The Rust backend should own SSH, decoding, ANSI parsing, and the
+   Welly-style screen buffer; frontends should only render that buffer and
+   forward input.
 
 ## Development
 
