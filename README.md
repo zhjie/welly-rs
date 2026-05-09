@@ -27,18 +27,13 @@ preserve.
 
 ## Roadmap
 
-1. Stop reading Welly's private key
-
-   Move authentication to Welly-rs' own configuration/storage path. If no
-   Welly-rs credential exists, fall back to password login.
-
-2. Improve connection stability
+1. Improve connection stability
 
    The client still disconnects too often. Investigate SSH session lifetime,
    channel read/write loops, keepalive behavior, reconnect handling, and error
    reporting before adding broader configuration features.
 
-3. Add connection and login configuration
+2. Add connection and login configuration
 
    Support a simple single-site configuration: host, port, username, and
    authentication method. Default to `bbs.newsmth.net:22`.
@@ -47,19 +42,19 @@ preserve.
    storage, prefer platform credential storage where practical, such as macOS
    Keychain; keep plain config files limited to non-secret fields.
 
-4. Detect links and open them in the browser
+3. Detect links and open them in the browser
 
    Identify URLs in terminal text, show a hover affordance, and open them with
    the system browser on click. Start with ordinary HTTP/HTTPS URLs before
    adding more BBS-specific patterns.
 
-5. Preview image attachments
+4. Preview image attachments
 
    Some pages contain image attachments. Build this after link detection so the
    same hit testing and URL handling can be reused. First version can open or
    preview on click; hover preview can come later if it feels reliable.
 
-6. Test cross-platform compatibility
+5. Test cross-platform compatibility
 
    Stabilize in this order:
 
