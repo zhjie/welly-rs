@@ -3,10 +3,16 @@ use crate::config::ConnectionSettings;
 use crate::terminal::Terminal;
 use russh::*;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const ANTI_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const ANTI_IDLE_THRESHOLD: Duration = Duration::from_secs(59);
+const ANTI_IDLE_PAYLOAD: [u8; 6] = [0; 6];
 
 pub struct SshClient {
-    session: Arc<Mutex<client::Handle<Client>>>,
+    session: Arc<tokio::sync::Mutex<client::Handle<Client>>>,
     channel_id: ChannelId,
+    last_send_at: Arc<Mutex<Instant>>,
 }
 
 impl SshClient {
@@ -30,11 +36,13 @@ impl SshClient {
         let channel_id = channel.id();
 
         let client = Self {
-            session: Arc::new(Mutex::new(session)),
+            session: Arc::new(tokio::sync::Mutex::new(session)),
             channel_id,
+            last_send_at: Arc::new(Mutex::new(Instant::now())),
         };
 
         let client_arc = Arc::new(client);
+        client_arc.start_anti_idle_loop();
 
         channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await?;
         channel.request_shell(true).await?;
@@ -82,10 +90,38 @@ impl SshClient {
     }
 
     pub async fn send_data(&self, data: &[u8]) -> Result<(), russh::Error> {
-        let session = self.session.lock().unwrap();
-        let _ = session.data(self.channel_id, bytes::Bytes::copy_from_slice(data)).await;
+        let session = self.session.lock().await;
+        session
+            .data(self.channel_id, bytes::Bytes::copy_from_slice(data))
+            .await
+            .map_err(|_| russh::Error::SendError)?;
+        *self.last_send_at.lock().unwrap() = Instant::now();
         Ok(())
     }
+
+    fn start_anti_idle_loop(self: &Arc<Self>) {
+        let client = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(ANTI_IDLE_CHECK_INTERVAL);
+            loop {
+                interval.tick().await;
+                if client.should_send_anti_idle(Instant::now()) {
+                    if let Err(e) = client.send_data(&ANTI_IDLE_PAYLOAD).await {
+                        log::error!("Anti-idle send error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn should_send_anti_idle(&self, now: Instant) -> bool {
+        anti_idle_due(*self.last_send_at.lock().unwrap(), now)
+    }
+}
+
+fn anti_idle_due(last_send_at: Instant, now: Instant) -> bool {
+    now.duration_since(last_send_at) >= ANTI_IDLE_THRESHOLD
 }
 
 async fn authenticate(
@@ -124,6 +160,34 @@ async fn authenticate(
     }
 
     Err(russh::Error::NotAuthenticated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anti_idle_due, ANTI_IDLE_PAYLOAD};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn anti_idle_payload_matches_welly_nul_bytes() {
+        assert_eq!(ANTI_IDLE_PAYLOAD, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn anti_idle_stays_quiet_before_threshold() {
+        let last_send = Instant::now();
+
+        assert!(!anti_idle_due(
+            last_send,
+            last_send + Duration::from_secs(58)
+        ));
+    }
+
+    #[test]
+    fn anti_idle_fires_after_welly_idle_window() {
+        let last_send = Instant::now();
+
+        assert!(anti_idle_due(last_send, last_send + Duration::from_secs(59)));
+    }
 }
 
 struct Client {}
