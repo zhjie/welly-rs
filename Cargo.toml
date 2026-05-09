@@ -2,6 +2,7 @@
 name = "welly-rs"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 egui = "0.29"
@@ -17,4 +18,3 @@ dirs = "6.0.0"
 crossbeam-channel = "0.5.15"
 encoding_rs = "0.8.35"
 unicode-width = "0.1"
-
