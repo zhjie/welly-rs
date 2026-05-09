@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 #![allow(clippy::items_after_test_module)]
 
 use crossbeam_channel::{Receiver, Sender};
@@ -20,11 +21,26 @@ const ZOOM_STEP: f32 = 1.05;
 const TERMINAL_COLS: usize = 80;
 const TERMINAL_ROWS: usize = 24;
 
-const ENGLISH_FONT_PATH: &str = "/System/Library/Fonts/Monaco.ttf";
-const ENGLISH_FONT_NAME: &str = "monaco";
+// Font paths/names are chosen at runtime depending on platform.
+// macOS: Monaco + STHeiti (existing defaults)
+// Windows: Consolas + SimHei (黑体)
+// Linux: prefer Monaco if present, otherwise fallback to system defaults.
 
-const CHINESE_FONT_PATH: &str = "/System/Library/Fonts/STHeiti Medium.ttc";
+// Logical font names for runtime selection (used elsewhere in code)
+#[cfg(target_os = "macos")]
+const ENGLISH_FONT_NAME: &str = "monaco";
+#[cfg(target_os = "macos")]
 const CHINESE_FONT_NAME: &str = "stheiti";
+
+#[cfg(target_os = "windows")]
+const ENGLISH_FONT_NAME: &str = "cascadia";
+#[cfg(target_os = "windows")]
+const CHINESE_FONT_NAME: &str = "simhei";
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const ENGLISH_FONT_NAME: &str = "monaco";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const CHINESE_FONT_NAME: &str = "wqy";
 
 mod ansi_parser;
 mod attachment;
@@ -73,54 +89,142 @@ fn main() -> eframe::Result {
 
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+    // Try ordered lists of candidate fonts for English and Chinese, picking the first available.
+    let english_candidates = ["monaco", "cascadia", "caskaydia"];
+    let chinese_candidates = ["stheiti", "simhei", "noto"];
 
-    if let Ok(english_font) = std::fs::read(ENGLISH_FONT_PATH) {
-        fonts.font_data.insert(
-            ENGLISH_FONT_NAME.to_owned(),
-            FontData::from_owned(english_font),
-        );
-    } else {
-        log::warn!("English font not found: {}", ENGLISH_FONT_PATH);
+    let mut chosen_english_name = "monaco";
+    let mut chosen_chinese_name = "wqy";
+
+    // Helper to resolve a logical font name to a platform-specific path
+    let resolve_path = |logical: &str| -> Option<&'static str> {
+        match logical {
+            "monaco" => {
+                if cfg!(target_os = "macos") {
+                    Some("/System/Library/Fonts/Monaco.ttf")
+                } else if cfg!(target_os = "linux") {
+                    Some("/usr/share/fonts/truetype/monaco/Monaco.ttf")
+                } else {
+                    None
+                }
+            }
+            "cascadia" => {
+                if cfg!(target_os = "windows") {
+                    Some("C:\\Windows\\Fonts\\CascadiaCode.ttf")
+                } else if cfg!(target_os = "linux") {
+                    Some("/usr/share/fonts/truetype/cascadia/CascadiaCode.ttf")
+                } else {
+                    None
+                }
+            }
+            "caskaydia" => {
+                if cfg!(target_os = "windows") {
+                    Some("C:\\Windows\\Fonts\\CaskaydiaCoveCode.ttf")
+                } else if cfg!(target_os = "linux") {
+                    Some("/usr/share/fonts/truetype/caskaydia/CaskaydiaCoveCode.ttf")
+                } else {
+                    None
+                }
+            }
+            "stheiti" => {
+                if cfg!(target_os = "macos") {
+                    Some("/System/Library/Fonts/STHeiti Medium.ttc")
+                } else {
+                    None
+                }
+            }
+            "simhei" => {
+                if cfg!(target_os = "windows") {
+                    Some("C:\\Windows\\Fonts\\simhei.ttf")
+                } else if cfg!(target_os = "linux") {
+                    Some("/usr/share/fonts/truetype/simhei/simhei.ttf")
+                } else {
+                    None
+                }
+            }
+            "noto" => {
+                if cfg!(target_os = "linux") {
+                    Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+
+    // Try English candidates in order
+    let mut english_path_opt: Option<String> = None;
+    for &cand in &english_candidates {
+        if let Some(path) = resolve_path(cand) {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(cand.to_owned(), FontData::from_owned(bytes));
+                chosen_english_name = cand;
+                english_path_opt = Some(path.to_owned());
+                break;
+            } else {
+                log::debug!("English candidate not found: {}", path);
+            }
+        }
     }
 
-    if let Ok(chinese_font) = std::fs::read(CHINESE_FONT_PATH) {
-        fonts.font_data.insert(
-            CHINESE_FONT_NAME.to_owned(),
-            FontData::from_owned(chinese_font),
-        );
-    } else {
-        log::warn!("Chinese font not found: {}", CHINESE_FONT_PATH);
+    // Try Chinese candidates in order
+    let mut chinese_path_opt: Option<String> = None;
+    for &cand in &chinese_candidates {
+        if let Some(path) = resolve_path(cand) {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(cand.to_owned(), FontData::from_owned(bytes));
+                chosen_chinese_name = cand;
+                chinese_path_opt = Some(path.to_owned());
+                break;
+            } else {
+                log::debug!("Chinese candidate not found: {}", path);
+            }
+        }
     }
 
+    if english_path_opt.is_none() {
+        log::warn!("No English candidate fonts found; egui will use fallback families");
+    } else if let Some(p) = &english_path_opt {
+        log::info!("Using English font '{}' from {}", chosen_english_name, p);
+    }
+
+    if chinese_path_opt.is_none() {
+        log::warn!("No Chinese candidate fonts found; egui will use fallback families");
+    } else if let Some(p) = &chinese_path_opt {
+        log::info!("Using Chinese font '{}' from {}", chosen_chinese_name, p);
+    }
+
+    // Prefer chosen English for monospace and proportional; add chinese as fallback.
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
-        .insert(0, ENGLISH_FONT_NAME.to_owned());
+        .insert(0, chosen_english_name.to_owned());
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
-        .push(CHINESE_FONT_NAME.to_owned());
+        .push(chosen_chinese_name.to_owned());
 
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .insert(0, ENGLISH_FONT_NAME.to_owned());
+        .insert(0, chosen_english_name.to_owned());
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .push(CHINESE_FONT_NAME.to_owned());
+        .push(chosen_chinese_name.to_owned());
 
     fonts.families.insert(
-        FontFamily::Name(ENGLISH_FONT_NAME.into()),
-        vec![ENGLISH_FONT_NAME.to_owned(), CHINESE_FONT_NAME.to_owned()],
+        FontFamily::Name(chosen_english_name.into()),
+        vec![chosen_english_name.to_owned(), chosen_chinese_name.to_owned()],
     );
     fonts.families.insert(
-        FontFamily::Name(CHINESE_FONT_NAME.into()),
-        vec![CHINESE_FONT_NAME.to_owned(), ENGLISH_FONT_NAME.to_owned()],
+        FontFamily::Name(chosen_chinese_name.into()),
+        vec![chosen_chinese_name.to_owned(), chosen_english_name.to_owned()],
     );
 
     ctx.set_fonts(fonts);
