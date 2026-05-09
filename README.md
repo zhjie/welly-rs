@@ -16,7 +16,7 @@ available consistently across macOS, Windows, and Linux. Thanks to Welly and its
 contributors for setting the shape of the experience this project is trying to
 preserve.
 
-## Usage
+## Usage (for test)
 
 Configure your SSH login in `~/.ssh/config`:
 

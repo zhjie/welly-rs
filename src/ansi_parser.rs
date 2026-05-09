@@ -329,8 +329,7 @@ impl AnsiParser {
         }
     }
 
-    fn process_osc_end(&mut self, ch: char, _terminal: &mut Terminal) {
-        if ch == '\\' || ch == '\u{07}' {}
+    fn process_osc_end(&mut self, _ch: char, _terminal: &mut Terminal) {
         self.state = ParserState::Normal;
     }
 

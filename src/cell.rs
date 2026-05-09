@@ -49,7 +49,7 @@ pub enum Color {
 }
 
 impl Color {
-    pub fn to_egui_color(&self) -> egui::Color32 {
+    pub fn egui_color(self) -> egui::Color32 {
         match self {
             Color::Default => egui::Color32::WHITE,
             Color::Black => egui::Color32::from_rgb(0, 0, 0),
@@ -68,8 +68,8 @@ impl Color {
             Color::BrightMagenta => egui::Color32::from_rgb(255, 0, 255),
             Color::BrightCyan => egui::Color32::from_rgb(0, 255, 255),
             Color::BrightWhite => egui::Color32::from_rgb(255, 255, 255),
-            Color::Indexed(i) => Self::indexed_to_rgb(*i),
-            Color::Rgb(r, g, b) => egui::Color32::from_rgb(*r, *g, *b),
+            Color::Indexed(i) => Self::indexed_to_rgb(i),
+            Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
         }
     }
 
@@ -94,7 +94,7 @@ impl Color {
                     Color::BrightCyan,
                     Color::BrightWhite,
                 ];
-                colors[index as usize].to_egui_color()
+                colors[index as usize].egui_color()
             }
             16..=231 => {
                 let idx = index - 16;

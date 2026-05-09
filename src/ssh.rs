@@ -151,6 +151,19 @@ fn anti_idle_due(last_send_at: Instant, now: Instant) -> bool {
     now.duration_since(last_send_at) >= ANTI_IDLE_THRESHOLD
 }
 
+struct Client {}
+
+impl client::Handler for Client {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
 async fn authenticate(
     session: &mut client::Handle<Client>,
     settings: &ConnectionSettings,
@@ -217,18 +230,5 @@ mod tests {
             last_send,
             last_send + Duration::from_secs(59)
         ));
-    }
-}
-
-struct Client {}
-
-impl client::Handler for Client {
-    type Error = russh::Error;
-
-    fn check_server_key(
-        &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        async { Ok(true) }
     }
 }

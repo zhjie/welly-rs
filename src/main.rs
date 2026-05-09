@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
@@ -37,6 +39,10 @@ use config::ConnectionSettings;
 use encoding_rs::GB18030;
 use ssh::{is_channel_closed_error, SshClient};
 use terminal::Terminal;
+
+type ConnectResult = Result<Arc<SshClient>, String>;
+type ConnectSender = Sender<ConnectResult>;
+type ConnectReceiver = Receiver<ConnectResult>;
 
 fn main() -> eframe::Result {
     env_logger::init();
@@ -131,7 +137,7 @@ struct App {
     terminal: Arc<Mutex<Terminal>>,
     parser: Arc<Mutex<AnsiParser>>,
     ssh_client: Option<Arc<SshClient>>,
-    connect_rx: Option<Receiver<Result<Arc<SshClient>, String>>>,
+    connect_rx: Option<ConnectReceiver>,
     connected: bool,
     settings: ConnectionSettings,
     login_host: String,
@@ -255,10 +261,7 @@ impl App {
         let parser = Arc::clone(&self.parser);
         let settings = self.settings.clone();
         let ctx = ctx.clone();
-        let (tx, rx): (
-            Sender<Result<Arc<SshClient>, String>>,
-            Receiver<Result<Arc<SshClient>, String>>,
-        ) = crossbeam_channel::bounded(1);
+        let (tx, rx): (ConnectSender, ConnectReceiver) = crossbeam_channel::bounded(1);
         self.connect_rx = Some(rx);
 
         std::thread::spawn(move || {
@@ -1073,16 +1076,14 @@ fn render_terminal(
             });
         });
     }
-    paint_terminal(
-        &term,
-        terminal_rect,
-        response.rect,
-        painter.clone(),
+    let geometry = TerminalPaintGeometry {
+        rect: terminal_rect,
+        canvas_rect: response.rect,
         cell_width,
         cell_height,
         render_scale,
-        selection,
-    );
+    };
+    paint_terminal(&term, geometry, painter.clone(), selection);
 
     drop(term);
     TerminalResponse {
@@ -1126,18 +1127,28 @@ fn paint_selection(
 
 fn paint_terminal(
     term: &Terminal,
-    rect: egui::Rect,
-    canvas_rect: egui::Rect,
+    geometry: TerminalPaintGeometry,
     painter: egui::Painter,
-    cell_width: f32,
-    cell_height: f32,
-    render_scale: f32,
     selection: Option<Selection>,
 ) {
-    painter.rect_filled(canvas_rect, 0.0, egui::Color32::BLACK);
-    paint_terminal_edge_bleed(term, rect, canvas_rect, &painter, cell_width, cell_height);
+    painter.rect_filled(geometry.canvas_rect, 0.0, egui::Color32::BLACK);
+    paint_terminal_edge_bleed(
+        term,
+        geometry.rect,
+        geometry.canvas_rect,
+        &painter,
+        geometry.cell_width,
+        geometry.cell_height,
+    );
     if let Some(selection) = selection {
-        paint_selection(term, selection, rect, &painter, cell_width, cell_height);
+        paint_selection(
+            term,
+            selection,
+            geometry.rect,
+            &painter,
+            geometry.cell_width,
+            geometry.cell_height,
+        );
     }
 
     for row in 0..term.rows {
@@ -1147,15 +1158,18 @@ fn paint_terminal(
                 continue;
             }
 
-            let x = rect.min.x + col as f32 * cell_width;
-            let y = rect.min.y + row as f32 * cell_height;
+            let x = geometry.rect.min.x + col as f32 * geometry.cell_width;
+            let y = geometry.rect.min.y + row as f32 * geometry.cell_height;
 
             let bg_color = cell_background_color(cell);
 
             if cell.bg_color != cell::Color::Default || cell.reverse {
-                let bg_width = cell_width * cell.width as f32;
+                let bg_width = geometry.cell_width * cell.width as f32;
                 painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bg_width, cell_height)),
+                    egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(bg_width, geometry.cell_height),
+                    ),
                     0.0,
                     bg_color,
                 );
@@ -1165,25 +1179,28 @@ fn paint_terminal(
 
             let cell_rect = egui::Rect::from_min_size(
                 egui::pos2(x, y),
-                egui::vec2(cell_width * cell.width as f32, cell_height),
+                egui::vec2(
+                    geometry.cell_width * cell.width as f32,
+                    geometry.cell_height,
+                ),
             );
-            if draw_welly_box_char(&painter, cell_rect, cell.ch, fg_color, cell_width) {
+            if draw_welly_box_char(&painter, cell_rect, cell.ch, fg_color, geometry.cell_width) {
                 continue;
             }
 
             let (font_size, font_family) = if cell.width > 1 {
                 (
-                    CHINESE_FONT_SIZE * render_scale,
+                    CHINESE_FONT_SIZE * geometry.render_scale,
                     FontFamily::Name(CHINESE_FONT_NAME.into()),
                 )
             } else {
                 (
-                    ENGLISH_FONT_SIZE * render_scale,
+                    ENGLISH_FONT_SIZE * geometry.render_scale,
                     FontFamily::Name(ENGLISH_FONT_NAME.into()),
                 )
             };
             painter.text(
-                text_paint_position(x, y, render_scale, cell),
+                text_paint_position(x, y, geometry.render_scale, cell),
                 egui::Align2::LEFT_TOP,
                 cell.ch.to_string(),
                 egui::FontId::new(font_size, font_family),
@@ -1199,16 +1216,28 @@ fn paint_terminal(
     } else {
         1
     };
-    let cursor_x = rect.min.x + cursor_col as f32 * cell_width;
-    let cursor_y = rect.min.y + term.cursor_row as f32 * cell_height;
+    let cursor_x = geometry.rect.min.x + cursor_col as f32 * geometry.cell_width;
+    let cursor_y = geometry.rect.min.y + term.cursor_row as f32 * geometry.cell_height;
     painter.rect_filled(
         egui::Rect::from_min_size(
             egui::pos2(cursor_x, cursor_y),
-            egui::vec2(cell_width * cursor_width as f32, cell_height),
+            egui::vec2(
+                geometry.cell_width * cursor_width as f32,
+                geometry.cell_height,
+            ),
         ),
         0.0,
         egui::Color32::from_rgb(200, 200, 200),
     );
+}
+
+#[derive(Clone, Copy)]
+struct TerminalPaintGeometry {
+    rect: egui::Rect,
+    canvas_rect: egui::Rect,
+    cell_width: f32,
+    cell_height: f32,
+    render_scale: f32,
 }
 
 fn text_paint_position(x: f32, y: f32, render_scale: f32, cell: &cell::Cell) -> egui::Pos2 {
@@ -1299,15 +1328,15 @@ fn cell_foreground_color(cell: &cell::Cell) -> egui::Color32 {
 
 fn foreground_color(color: cell::Color) -> egui::Color32 {
     match color {
-        cell::Color::Default => cell::Color::White.to_egui_color(),
-        _ => color.to_egui_color(),
+        cell::Color::Default => cell::Color::White.egui_color(),
+        _ => color.egui_color(),
     }
 }
 
 fn background_color(color: cell::Color) -> egui::Color32 {
     match color {
         cell::Color::Default => egui::Color32::BLACK,
-        _ => color.to_egui_color(),
+        _ => color.egui_color(),
     }
 }
 
