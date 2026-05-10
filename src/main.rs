@@ -128,6 +128,14 @@ fn decode_rgba_icon(bytes: &[u8]) -> Option<egui::IconData> {
     })
 }
 
+fn font_for_cell(cell: &cell::Cell) -> (&'static str, f32) {
+    if cell.ch.is_ascii() {
+        (ENGLISH_FONT_NAME, ENGLISH_FONT_SIZE)
+    } else {
+        (CHINESE_FONT_NAME, CHINESE_FONT_SIZE)
+    }
+}
+
 fn main() -> eframe::Result {
     env_logger::init();
 
@@ -848,7 +856,7 @@ fn terminal_event_to_bytes(event: &egui::Event) -> Option<Vec<u8>> {
 }
 
 fn text_to_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.is_empty() {
+    if text.is_empty() || text.chars().any(char::is_control) {
         None
     } else {
         let (bytes, _, _) = GB18030.encode(text);
@@ -995,6 +1003,10 @@ mod tests {
             Some(vec![0x07])
         );
         assert_eq!(
+            key_event_to_bytes(egui::Key::K, egui::Modifiers::CTRL),
+            Some(vec![0x0b])
+        );
+        assert_eq!(
             key_event_to_bytes(egui::Key::Enter, egui::Modifiers::CTRL),
             Some(vec![0x0d])
         );
@@ -1122,6 +1134,20 @@ mod tests {
     }
 
     #[test]
+    fn text_events_do_not_send_control_characters() {
+        assert_eq!(
+            terminal_event_to_bytes(&egui::Event::Text("\u{0b}".to_owned())),
+            None
+        );
+        assert_eq!(
+            terminal_event_to_bytes(&egui::Event::Ime(egui::ImeEvent::Commit(
+                "\u{0b}".to_owned()
+            ))),
+            None
+        );
+    }
+
+    #[test]
     fn font_sizes_follow_welly_default_proportions() {
         assert_eq!(
             super::CHINESE_FONT_SIZE,
@@ -1130,6 +1156,34 @@ mod tests {
         assert_eq!(
             super::ENGLISH_FONT_SIZE,
             (super::CELL_HEIGHT * 18.0_f32 / 24.0).round()
+        );
+    }
+
+    #[test]
+    fn ascii_cells_use_english_font_even_when_cell_is_wide() {
+        let cell = crate::cell::Cell {
+            ch: '9',
+            width: 2,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            super::font_for_cell(&cell),
+            (super::ENGLISH_FONT_NAME, super::ENGLISH_FONT_SIZE)
+        );
+    }
+
+    #[test]
+    fn chinese_cells_use_chinese_font() {
+        let cell = crate::cell::Cell {
+            ch: '在',
+            width: 2,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            super::font_for_cell(&cell),
+            (super::CHINESE_FONT_NAME, super::CHINESE_FONT_SIZE)
         );
     }
 
@@ -1440,22 +1494,15 @@ fn paint_terminal(
                 continue;
             }
 
-            let (font_size, font_family) = if cell.width > 1 {
-                (
-                    CHINESE_FONT_SIZE * geometry.render_scale,
-                    FontFamily::Name(CHINESE_FONT_NAME.into()),
-                )
-            } else {
-                (
-                    ENGLISH_FONT_SIZE * geometry.render_scale,
-                    FontFamily::Name(ENGLISH_FONT_NAME.into()),
-                )
-            };
+            let (font_name, font_size) = font_for_cell(cell);
             painter.text(
                 text_paint_position(x, y, geometry.render_scale, cell),
                 egui::Align2::LEFT_TOP,
                 cell.ch.to_string(),
-                egui::FontId::new(font_size, font_family),
+                egui::FontId::new(
+                    font_size * geometry.render_scale,
+                    FontFamily::Name(font_name.into()),
+                ),
                 fg_color,
             );
         }

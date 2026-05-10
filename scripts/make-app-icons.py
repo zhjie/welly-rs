@@ -5,6 +5,7 @@ import zlib
 from pathlib import Path
 
 
+TRANSPARENT = (0, 0, 0, 0)
 BG = (17, 19, 24, 255)
 PANEL = (23, 27, 34, 255)
 GRID = (44, 52, 64, 255)
@@ -99,8 +100,8 @@ def png_bytes(img):
     raw = bytearray()
     for row in img:
         raw.append(0)
-        for r, g, b, _ in row:
-            raw.extend((r, g, b))
+        for r, g, b, a in row:
+            raw.extend((r, g, b, a))
 
     def chunk(kind, data):
         return (
@@ -111,7 +112,7 @@ def png_bytes(img):
         )
 
     png = bytearray(b"\x89PNG\r\n\x1a\n")
-    png.extend(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+    png.extend(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)))
     png.extend(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
     png.extend(chunk(b"IEND", b""))
     return bytes(png)
@@ -176,7 +177,7 @@ def write_rgba(path, img):
 
 
 def draw_icon(size):
-    img = [[BG for _ in range(size)] for _ in range(size)]
+    img = [[TRANSPARENT for _ in range(size)] for _ in range(size)]
     scale = size / 1024.0
 
     def s(value):
