@@ -73,6 +73,7 @@ fn main() -> eframe::Result {
                 TERMINAL_COLS as f32 * CELL_WIDTH * MIN_ZOOM,
                 TERMINAL_ROWS as f32 * CELL_HEIGHT * MIN_ZOOM,
             ]),
+        centered: true,
         ..Default::default()
     };
 
@@ -351,6 +352,26 @@ impl App {
             CELL_WIDTH,
             CELL_HEIGHT,
         ))));
+
+        // `centered: true` centers the window on the screen, but on Windows the
+        // taskbar at the bottom makes the work area's vertical center appear lower
+        // than expected. Read the actual monitor size and outer rect from the first
+        // frame and move the window up so it sits at roughly 1/3 from the top.
+        let (monitor_size, outer_rect) = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.monitor_size, vp.outer_rect)
+        });
+        if let (Some(monitor), Some(outer)) = (monitor_size, outer_rect) {
+            let win_h = outer.height();
+            let target_y = (monitor.y - win_h) / 3.0;
+            if target_y >= 0.0 && (target_y - outer.min.y).abs() > 10.0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    outer.min.x,
+                    target_y,
+                )));
+            }
+        }
+
         self.configured_viewport = true;
     }
 
@@ -500,7 +521,12 @@ impl App {
                         continue;
                     }
 
-                    if modifiers.command && key == egui::Key::R {
+                    // macOS: Cmd+R (command=true, ctrl=false)
+                    // Windows/Linux: Alt+R (alt=true, ctrl=false)
+                    let is_reconnect = key == egui::Key::R
+                        && ((modifiers.command && !modifiers.ctrl)
+                            || (modifiers.alt && !modifiers.ctrl));
+                    if is_reconnect {
                         self.selection = None;
                         self.reconnect(ctx);
                         continue;
@@ -776,7 +802,11 @@ fn text_to_bytes(text: &str) -> Option<Vec<u8>> {
 }
 
 fn key_event_to_bytes(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<u8>> {
-    if modifiers.command {
+    // On macOS, `command` is the ⌘ key (ctrl=false). On Windows/Linux, `command`
+    // is an alias for ctrl (so both command and ctrl are true). Only block when it
+    // is a true macOS Command shortcut (command=true, ctrl=false) to avoid
+    // accidentally eating Windows Ctrl+key sequences.
+    if modifiers.command && !modifiers.ctrl {
         return None;
     }
 
