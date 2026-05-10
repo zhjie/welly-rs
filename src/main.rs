@@ -4,7 +4,9 @@
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
+use std::borrow::Cow;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
 const CELL_WIDTH: f32 = 18.0;
@@ -20,27 +22,44 @@ const MAX_ZOOM: f32 = 3.0;
 const ZOOM_STEP: f32 = 1.05;
 const TERMINAL_COLS: usize = 80;
 const TERMINAL_ROWS: usize = 24;
+const APP_ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/welly-rs-app-icon.rgba"));
 
-// Font paths/names are chosen at runtime depending on platform.
-// macOS: Monaco + STHeiti (existing defaults)
-// Windows: Consolas + SimHei (黑体)
-// Linux: prefer Monaco if present, otherwise fallback to system defaults.
+const ENGLISH_FONT_NAME: &str = "welly-english";
+const CHINESE_FONT_NAME: &str = "welly-chinese";
 
-// Logical font names for runtime selection (used elsewhere in code)
-#[cfg(target_os = "macos")]
-const ENGLISH_FONT_NAME: &str = "monaco";
-#[cfg(target_os = "macos")]
-const CHINESE_FONT_NAME: &str = "stheiti";
+const ENGLISH_FONT_CANDIDATES: &[FontCandidate] = &[
+    FontCandidate {
+        egui_name: ENGLISH_FONT_NAME,
+        families: &["Monaco"],
+    },
+    FontCandidate {
+        egui_name: ENGLISH_FONT_NAME,
+        families: &["Cascadia Mono"],
+    },
+    FontCandidate {
+        egui_name: ENGLISH_FONT_NAME,
+        families: &["CaskaydiaMono"],
+    },
+];
 
-#[cfg(target_os = "windows")]
-const ENGLISH_FONT_NAME: &str = "cascadia";
-#[cfg(target_os = "windows")]
-const CHINESE_FONT_NAME: &str = "simhei";
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const ENGLISH_FONT_NAME: &str = "monaco";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const CHINESE_FONT_NAME: &str = "wqy";
+const CHINESE_FONT_CANDIDATES: &[FontCandidate] = &[
+    FontCandidate {
+        egui_name: CHINESE_FONT_NAME,
+        families: &["Heiti SC"],
+    },
+    FontCandidate {
+        egui_name: CHINESE_FONT_NAME,
+        families: &["SimHei"],
+    },
+    FontCandidate {
+        egui_name: CHINESE_FONT_NAME,
+        families: &["Noto Sans Mono CJK SC"],
+    },
+    FontCandidate {
+        egui_name: CHINESE_FONT_NAME,
+        families: &["Sarasa Mono SC"],
+    },
+];
 
 mod ansi_parser;
 mod attachment;
@@ -60,6 +79,55 @@ type ConnectResult = Result<Arc<SshClient>, String>;
 type ConnectSender = Sender<ConnectResult>;
 type ConnectReceiver = Receiver<ConnectResult>;
 
+#[derive(Clone, Copy)]
+struct FontCandidate {
+    egui_name: &'static str,
+    families: &'static [&'static str],
+}
+
+struct LoadedFont {
+    egui_name: &'static str,
+    family_name: String,
+    data: Vec<u8>,
+    index: u32,
+}
+
+fn app_icon() -> Arc<egui::IconData> {
+    static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        Arc::new(
+            decode_rgba_icon(APP_ICON_RGBA).unwrap_or_else(|| egui::IconData {
+                rgba: Vec::new(),
+                width: 0,
+                height: 0,
+            }),
+        )
+    })
+    .clone()
+}
+
+fn decode_rgba_icon(bytes: &[u8]) -> Option<egui::IconData> {
+    if bytes.len() < 8 {
+        return None;
+    }
+
+    let width = u32::from_be_bytes(bytes[0..4].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
+    if width == 0 || height == 0 || width != height {
+        return None;
+    }
+    let rgba = bytes[8..].to_vec();
+    if rgba.len() != width as usize * height as usize * 4 {
+        return None;
+    }
+
+    Some(egui::IconData {
+        rgba,
+        width,
+        height,
+    })
+}
+
 fn main() -> eframe::Result {
     env_logger::init();
 
@@ -72,7 +140,8 @@ fn main() -> eframe::Result {
             .with_min_inner_size([
                 TERMINAL_COLS as f32 * CELL_WIDTH * MIN_ZOOM,
                 TERMINAL_ROWS as f32 * CELL_HEIGHT * MIN_ZOOM,
-            ]),
+            ])
+            .with_icon(app_icon()),
         centered: true,
         ..Default::default()
     };
@@ -90,145 +159,131 @@ fn main() -> eframe::Result {
 
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    // Try ordered lists of candidate fonts for English and Chinese, picking the first available.
-    let english_candidates = ["monaco", "cascadia", "caskaydia"];
-    let chinese_candidates = ["stheiti", "simhei", "noto"];
+    let font_db = load_system_font_db();
 
-    let mut chosen_english_name = "monaco";
-    let mut chosen_chinese_name = "wqy";
+    let english_font = load_font_candidate(&font_db, ENGLISH_FONT_CANDIDATES);
+    let chinese_font = load_font_candidate(&font_db, CHINESE_FONT_CANDIDATES);
 
-    // Helper to resolve a logical font name to a platform-specific path
-    let resolve_path = |logical: &str| -> Option<&'static str> {
-        match logical {
-            "monaco" => {
-                if cfg!(target_os = "macos") {
-                    Some("/System/Library/Fonts/Monaco.ttf")
-                } else if cfg!(target_os = "linux") {
-                    Some("/usr/share/fonts/truetype/monaco/Monaco.ttf")
-                } else {
-                    None
-                }
-            }
-            "cascadia" => {
-                if cfg!(target_os = "windows") {
-                    Some("C:\\Windows\\Fonts\\CascadiaCode.ttf")
-                } else if cfg!(target_os = "linux") {
-                    Some("/usr/share/fonts/truetype/cascadia/CascadiaCode.ttf")
-                } else {
-                    None
-                }
-            }
-            "caskaydia" => {
-                if cfg!(target_os = "windows") {
-                    Some("C:\\Windows\\Fonts\\CaskaydiaCoveCode.ttf")
-                } else if cfg!(target_os = "linux") {
-                    Some("/usr/share/fonts/truetype/caskaydia/CaskaydiaCoveCode.ttf")
-                } else {
-                    None
-                }
-            }
-            "stheiti" => {
-                if cfg!(target_os = "macos") {
-                    Some("/System/Library/Fonts/STHeiti Medium.ttc")
-                } else {
-                    None
-                }
-            }
-            "simhei" => {
-                if cfg!(target_os = "windows") {
-                    Some("C:\\Windows\\Fonts\\simhei.ttf")
-                } else if cfg!(target_os = "linux") {
-                    Some("/usr/share/fonts/truetype/simhei/simhei.ttf")
-                } else {
-                    None
-                }
-            }
-            "noto" => {
-                if cfg!(target_os = "linux") {
-                    Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    };
-
-    // Try English candidates in order
-    let mut english_path_opt: Option<String> = None;
-    for &cand in &english_candidates {
-        if let Some(path) = resolve_path(cand) {
-            if let Ok(bytes) = std::fs::read(path) {
-                fonts.font_data.insert(cand.to_owned(), FontData::from_owned(bytes));
-                chosen_english_name = cand;
-                english_path_opt = Some(path.to_owned());
-                break;
-            } else {
-                log::debug!("English candidate not found: {}", path);
-            }
-        }
-    }
-
-    // Try Chinese candidates in order
-    let mut chinese_path_opt: Option<String> = None;
-    for &cand in &chinese_candidates {
-        if let Some(path) = resolve_path(cand) {
-            if let Ok(bytes) = std::fs::read(path) {
-                fonts.font_data.insert(cand.to_owned(), FontData::from_owned(bytes));
-                chosen_chinese_name = cand;
-                chinese_path_opt = Some(path.to_owned());
-                break;
-            } else {
-                log::debug!("Chinese candidate not found: {}", path);
-            }
-        }
-    }
-
-    if english_path_opt.is_none() {
+    if let Some(loaded) = &english_font {
+        fonts.font_data.insert(
+            loaded.egui_name.to_owned(),
+            FontData {
+                font: Cow::Owned(loaded.data.clone()),
+                index: loaded.index,
+                tweak: Default::default(),
+            },
+        );
+        log::info!("Using English font '{}'", loaded.family_name);
+    } else {
         log::warn!("No English candidate fonts found; egui will use fallback families");
-    } else if let Some(p) = &english_path_opt {
-        log::info!("Using English font '{}' from {}", chosen_english_name, p);
     }
 
-    if chinese_path_opt.is_none() {
+    if let Some(loaded) = &chinese_font {
+        fonts.font_data.insert(
+            loaded.egui_name.to_owned(),
+            FontData {
+                font: Cow::Owned(loaded.data.clone()),
+                index: loaded.index,
+                tweak: Default::default(),
+            },
+        );
+        log::info!("Using Chinese font '{}'", loaded.family_name);
+    } else {
         log::warn!("No Chinese candidate fonts found; egui will use fallback families");
-    } else if let Some(p) = &chinese_path_opt {
-        log::info!("Using Chinese font '{}' from {}", chosen_chinese_name, p);
     }
 
-    // Prefer chosen English for monospace and proportional; add chinese as fallback.
+    let english_family = english_font
+        .as_ref()
+        .map(|font| font.egui_name)
+        .unwrap_or("Monospace");
+    let chinese_family = chinese_font
+        .as_ref()
+        .map(|font| font.egui_name)
+        .unwrap_or("Monospace");
+
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
-        .insert(0, chosen_english_name.to_owned());
+        .insert(0, english_family.to_owned());
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
-        .push(chosen_chinese_name.to_owned());
+        .push(chinese_family.to_owned());
 
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .insert(0, chosen_english_name.to_owned());
+        .insert(0, english_family.to_owned());
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .push(chosen_chinese_name.to_owned());
+        .push(chinese_family.to_owned());
 
     fonts.families.insert(
-        FontFamily::Name(chosen_english_name.into()),
-        vec![chosen_english_name.to_owned(), chosen_chinese_name.to_owned()],
+        FontFamily::Name(ENGLISH_FONT_NAME.into()),
+        vec![english_family.to_owned(), chinese_family.to_owned()],
     );
     fonts.families.insert(
-        FontFamily::Name(chosen_chinese_name.into()),
-        vec![chosen_chinese_name.to_owned(), chosen_english_name.to_owned()],
+        FontFamily::Name(CHINESE_FONT_NAME.into()),
+        vec![chinese_family.to_owned(), english_family.to_owned()],
     );
 
     ctx.set_fonts(fonts);
+}
+
+fn load_system_font_db() -> fontdb::Database {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    db
+}
+
+fn choose_font_candidate<F>(candidates: &[FontCandidate], is_available: F) -> Option<FontCandidate>
+where
+    F: Fn(&str) -> bool,
+{
+    candidates
+        .iter()
+        .copied()
+        .find(|candidate| candidate.families.iter().any(|family| is_available(family)))
+}
+
+fn load_font_candidate(db: &fontdb::Database, candidates: &[FontCandidate]) -> Option<LoadedFont> {
+    let candidate =
+        choose_font_candidate(candidates, |family| query_font_family(db, family).is_some())?;
+    load_candidate_font_data(db, candidate)
+}
+
+fn load_candidate_font_data(db: &fontdb::Database, candidate: FontCandidate) -> Option<LoadedFont> {
+    for family in candidate.families {
+        if let Some(id) = query_font_family(db, family) {
+            let Some(face) = db.face(id) else {
+                continue;
+            };
+            let Some(data) = db.with_face_data(id, |data, _| data.to_vec()) else {
+                continue;
+            };
+            return Some(LoadedFont {
+                egui_name: candidate.egui_name,
+                family_name: (*family).to_owned(),
+                data,
+                index: face.index,
+            });
+        }
+    }
+
+    None
+}
+
+fn query_font_family(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> {
+    let families = [fontdb::Family::Name(family)];
+    db.query(&fontdb::Query {
+        families: &families,
+        ..Default::default()
+    })
 }
 
 fn configure_terminal_view(ctx: &egui::Context) {
@@ -524,8 +579,8 @@ impl App {
                     // macOS: Cmd+R (command=true, ctrl=false)
                     // Windows/Linux: Alt+R (alt=true, ctrl=false)
                     let is_reconnect = key == egui::Key::R
-                        && ((modifiers.command && !modifiers.ctrl)
-                            || (modifiers.alt && !modifiers.ctrl));
+                        && (modifiers.command || modifiers.alt)
+                        && !modifiers.ctrl;
                     if is_reconnect {
                         self.selection = None;
                         self.reconnect(ctx);
@@ -927,9 +982,9 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_zoom_shortcut, key_event_to_bytes, selected_text, terminal_aspect_fit_size,
-        terminal_event_to_bytes, terminal_render_scale, terminal_size_for_zoom, GridPoint,
-        Selection, TERMINAL_COLS, TERMINAL_ROWS,
+        choose_font_candidate, handle_zoom_shortcut, key_event_to_bytes, selected_text,
+        terminal_aspect_fit_size, terminal_event_to_bytes, terminal_render_scale,
+        terminal_size_for_zoom, FontCandidate, GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
     };
     use crate::terminal::Terminal;
 
@@ -1076,6 +1131,69 @@ mod tests {
             super::ENGLISH_FONT_SIZE,
             (super::CELL_HEIGHT * 18.0_f32 / 24.0).round()
         );
+    }
+
+    #[test]
+    fn choose_font_candidate_returns_first_available_candidate() {
+        let candidates = [
+            FontCandidate {
+                egui_name: "missing",
+                families: &["Missing Font"],
+            },
+            FontCandidate {
+                egui_name: "available",
+                families: &["Available Font"],
+            },
+        ];
+        let installed_families = ["Available Font"];
+
+        let chosen =
+            choose_font_candidate(&candidates, |family| installed_families.contains(&family));
+
+        assert_eq!(chosen.unwrap().egui_name, "available");
+    }
+
+    #[test]
+    fn chinese_font_candidates_prefer_heiti_sc() {
+        assert_eq!(super::CHINESE_FONT_CANDIDATES[0].families, &["Heiti SC"]);
+    }
+
+    #[test]
+    fn chinese_font_candidates_use_shared_heiti_order() {
+        let families: Vec<&str> = super::CHINESE_FONT_CANDIDATES
+            .iter()
+            .flat_map(|candidate| candidate.families)
+            .copied()
+            .collect();
+
+        assert_eq!(
+            families,
+            vec![
+                "Heiti SC",
+                "SimHei",
+                "Noto Sans Mono CJK SC",
+                "Sarasa Mono SC"
+            ]
+        );
+    }
+
+    #[test]
+    fn english_font_candidates_use_shared_monospace_order() {
+        let families: Vec<&str> = super::ENGLISH_FONT_CANDIDATES
+            .iter()
+            .flat_map(|candidate| candidate.families)
+            .copied()
+            .collect();
+
+        assert_eq!(families, vec!["Monaco", "Cascadia Mono", "CaskaydiaMono"]);
+    }
+
+    #[test]
+    fn english_font_candidates_do_not_include_consolas() {
+        assert!(!super::ENGLISH_FONT_CANDIDATES
+            .iter()
+            .flat_map(|candidate| candidate.families)
+            .any(|family| *family == "Consolas"));
     }
 
     #[test]

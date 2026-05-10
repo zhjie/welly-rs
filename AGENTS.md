@@ -69,8 +69,8 @@ The UI uses Welly-like terminal metrics:
 
 Configured fonts:
 
-- English: `/System/Library/Fonts/Monaco.ttf`
-- Chinese: `/System/Library/Fonts/STHeiti Medium.ttc`
+- English: resolved by `fontdb` from the shared candidate list, preferring `Monaco`, then mono-style Cascadia/Caskaydia fonts.
+- Chinese: resolved by `fontdb` from the shared candidate list, preferring `Heiti SC`, then mono-style SimHei/Noto/Sarasa fallbacks.
 
 Named egui font families are bound for both fonts with cross-fallback. Text is positioned from the cell top margin so mixed Chinese/ASCII status text such as `在线/最高:1524/9994` has stable top spacing.
 

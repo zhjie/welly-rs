@@ -49,9 +49,9 @@ cargo run
 
    Stabilize in this order:
 
-   - macOS
-   - Windows
-   - Linux (maybe later)
+   [x] macOS
+   [x] Windows
+   [ ] Linux (maybe later)
 
    Pay special attention to fonts, IME behavior, keyboard modifiers, browser
    opening, and `~/.ssh/config` / SSH config equivalents.
@@ -84,6 +84,20 @@ cargo run
 cargo build
 cargo run
 cargo test
+```
+
+Build a local macOS app bundle:
+
+```sh
+scripts/build-macos-app.sh
+open target/release/bundle/macos/Welly-rs.app
+```
+
+Build a local macOS DMG:
+
+```sh
+scripts/build-macos-dmg.sh
+open target/release/bundle/macos/Welly-rs.dmg
 ```
 
 ## License
