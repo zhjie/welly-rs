@@ -37,6 +37,10 @@ HTTP(S) URLs on the terminal screen are clickable. Select a URL-like text
 without `http://` or `https://`, then double-click the selection to open it with
 `https://`.
 
+Mouse wheel scrolling sends Welly-style arrow keys to the BBS. Click visible
+entry text to move the BBS cursor to that row and press Enter. Click the left
+edge to go back, or the right-side upper/lower screen areas for PageUp/PageDown.
+
 ## Current Status
 
 - Native GUI built with `eframe`/`egui`.
@@ -45,8 +49,8 @@ without `http://` or `https://`, then double-click the selection to open it with
 - ANSI/CSI parsing for common terminal control sequences.
 - Welly-like 80x24 layout, font metrics, colors, reverse video, and VT100 art.
 - Welly-style keyboard shortcuts for basic navigation.
-- Chinese IME input, mouse selection/copy, anti-idle keepalive, clickable URLs,
-  and image attachment opening.
+- Chinese IME input, mouse selection/copy, basic Welly-style mouse navigation,
+  anti-idle keepalive, clickable URLs, and image attachment opening.
 
 ## Roadmap
 
@@ -78,13 +82,14 @@ without `http://` or `https://`, then double-click the selection to open it with
    Welly-style screen buffer; frontends should only render that buffer and
    forward input.
 
-## Development
+## TODO
 
-```sh
-cargo build
-cargo run
-cargo test
-```
+- Add Welly-style screen button hotspots for labels such as compose, delete,
+  help, board modes, reply, and mail actions.
+- Add author hotspots and context actions.
+- Add IP address tooltips.
+- Add precise compose-mode cursor movement by clicking a target cell.
+- Add contextual menus for mouse hotspots.
 
 Build a local macOS app bundle:
 

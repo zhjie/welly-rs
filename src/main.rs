@@ -316,6 +316,7 @@ struct App {
     auto_connect_attempted: bool,
     zoom: f32,
     selection: Option<Selection>,
+    suppress_mouse_entry_click: bool,
     pending_inner_size: Option<egui::Vec2>,
     last_inner_size: Option<egui::Vec2>,
     configured_viewport: bool,
@@ -343,6 +344,7 @@ impl Default for App {
             auto_connect_attempted: false,
             zoom: 1.0,
             selection: None,
+            suppress_mouse_entry_click: false,
             pending_inner_size: None,
             last_inner_size: None,
             configured_viewport: false,
@@ -391,6 +393,7 @@ impl eframe::App for App {
                 let terminal_response = render_terminal(ui, &self.terminal, self.selection);
                 self.handle_terminal_url_click(&terminal_response);
                 self.handle_terminal_selection(ctx, &terminal_response);
+                self.handle_terminal_mouse_click(&terminal_response);
                 self.render_attachment_button(ui);
                 if !self.connected
                     && self.connect_rx.is_none()
@@ -575,6 +578,12 @@ impl App {
                 egui::Event::Copy => {
                     self.copy_selection(ctx);
                 }
+                egui::Event::MouseWheel { delta, .. } => {
+                    if let Some(bytes) = mouse_wheel_to_bytes(delta) {
+                        self.selection = None;
+                        self.send_bytes(bytes);
+                    }
+                }
                 egui::Event::Key {
                     key,
                     pressed: true,
@@ -626,12 +635,14 @@ impl App {
         if terminal_response.response.drag_started() {
             if let Some(point) = terminal_response.interact_grid_point() {
                 self.selection = Some(Selection::new(point));
+                self.suppress_mouse_entry_click = true;
             }
         } else if terminal_response.response.dragged() {
             if let (Some(selection), Some(point)) =
                 (&mut self.selection, terminal_response.interact_grid_point())
             {
                 selection.end = point;
+                self.suppress_mouse_entry_click = true;
             }
         }
 
@@ -643,6 +654,7 @@ impl App {
             .response
             .double_clicked_by(egui::PointerButton::Primary)
         {
+            self.suppress_mouse_entry_click = true;
             self.open_selected_url();
         }
     }
@@ -668,6 +680,41 @@ impl App {
             {
                 open_url(&url);
             }
+        }
+    }
+
+    fn handle_terminal_mouse_click(&mut self, terminal_response: &TerminalResponse) {
+        if !terminal_response
+            .response
+            .clicked_by(egui::PointerButton::Primary)
+        {
+            return;
+        }
+
+        if self.suppress_mouse_entry_click {
+            self.suppress_mouse_entry_click = false;
+            return;
+        }
+
+        let Some(point) = terminal_response.interact_grid_point() else {
+            return;
+        };
+
+        let terminal = self.terminal.lock().unwrap();
+        if url_at_grid_point(&terminal, point).is_some() {
+            return;
+        }
+
+        let bytes = if is_mouse_entry_click_point(&terminal, point) {
+            Some(mouse_entry_click_to_bytes(terminal.cursor_row, point.row))
+        } else {
+            mouse_background_navigation_bytes(point)
+        };
+        drop(terminal);
+
+        if let Some(bytes) = bytes {
+            self.selection = None;
+            self.send_bytes(bytes);
         }
     }
 
@@ -809,6 +856,81 @@ impl Selection {
 
 fn grid_index(point: GridPoint) -> usize {
     point.row * TERMINAL_COLS + point.col
+}
+
+fn mouse_wheel_to_bytes(delta: egui::Vec2) -> Option<Vec<u8>> {
+    if delta.y.abs() >= delta.x.abs() && delta.y != 0.0 {
+        if delta.y > 0.0 {
+            Some(b"\x1b[A".to_vec())
+        } else {
+            Some(b"\x1b[B".to_vec())
+        }
+    } else if delta.x != 0.0 {
+        if delta.x > 0.0 {
+            Some(b"\x1b[D".to_vec())
+        } else {
+            Some(b"\x1b[C".to_vec())
+        }
+    } else {
+        None
+    }
+}
+
+fn mouse_entry_click_to_bytes(cursor_row: usize, target_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if target_row > cursor_row {
+        for _ in cursor_row..target_row {
+            bytes.extend_from_slice(b"\x1b[B");
+        }
+    } else {
+        for _ in target_row..cursor_row {
+            bytes.extend_from_slice(b"\x1b[A");
+        }
+    }
+    bytes.push(b'\r');
+    bytes
+}
+
+fn is_mouse_entry_click_point(term: &Terminal, point: GridPoint) -> bool {
+    if !(3..term.rows.saturating_sub(1)).contains(&point.row) || point.col < 2 {
+        return false;
+    }
+
+    let row = &term.grid[point.row];
+    let Some(start) = row
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find_map(|(col, cell)| (cell.width != 0 && cell.ch != ' ').then_some(col))
+    else {
+        return false;
+    };
+
+    let Some(end) = row.iter().enumerate().rev().find_map(|(col, cell)| {
+        (cell.width != 0 && cell.ch != ' ' && cell.ch != '\0').then_some(col)
+    }) else {
+        return false;
+    };
+
+    let click_end = end
+        .max(start.saturating_add(29))
+        .min(term.cols.saturating_sub(1));
+    (start..=click_end).contains(&point.col)
+}
+
+fn mouse_background_navigation_bytes(point: GridPoint) -> Option<Vec<u8>> {
+    if point.col == 0 && (3..TERMINAL_ROWS.saturating_sub(1)).contains(&point.row) {
+        return Some(b"\x1b[D".to_vec());
+    }
+
+    if point.col >= 20 {
+        if point.row < TERMINAL_ROWS / 2 {
+            return Some(b"\x1b[5~".to_vec());
+        }
+        return Some(b"\x1b[6~".to_vec());
+    }
+
+    None
 }
 
 struct TerminalResponse {
@@ -1216,12 +1338,92 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_font_candidate, handle_zoom_shortcut, key_event_to_bytes,
-        normalize_selected_url_for_open, selected_text, terminal_aspect_fit_size,
-        terminal_event_to_bytes, terminal_render_scale, terminal_size_for_zoom, FontCandidate,
-        GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
+        choose_font_candidate, cursor_underline_rect, handle_zoom_shortcut,
+        is_mouse_entry_click_point, key_event_to_bytes, mouse_background_navigation_bytes,
+        mouse_entry_click_to_bytes, mouse_wheel_to_bytes, normalize_selected_url_for_open,
+        selected_text, terminal_aspect_fit_size, terminal_event_to_bytes, terminal_render_scale,
+        terminal_size_for_zoom, FontCandidate, GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
     };
     use crate::terminal::Terminal;
+
+    #[test]
+    fn mouse_wheel_vertical_maps_to_welly_arrows() {
+        assert_eq!(
+            mouse_wheel_to_bytes(egui::vec2(0.0, 12.0)),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            mouse_wheel_to_bytes(egui::vec2(0.0, -12.0)),
+            Some(b"\x1b[B".to_vec())
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_horizontal_maps_to_welly_arrows() {
+        assert_eq!(
+            mouse_wheel_to_bytes(egui::vec2(12.0, 0.0)),
+            Some(b"\x1b[D".to_vec())
+        );
+        assert_eq!(
+            mouse_wheel_to_bytes(egui::vec2(-12.0, 0.0)),
+            Some(b"\x1b[C".to_vec())
+        );
+    }
+
+    #[test]
+    fn mouse_entry_click_moves_cursor_to_row_and_enters() {
+        assert_eq!(
+            mouse_entry_click_to_bytes(3, 6),
+            b"\x1b[B\x1b[B\x1b[B\r".to_vec()
+        );
+        assert_eq!(
+            mouse_entry_click_to_bytes(6, 3),
+            b"\x1b[A\x1b[A\x1b[A\r".to_vec()
+        );
+    }
+
+    #[test]
+    fn mouse_background_areas_map_to_welly_navigation_keys() {
+        assert_eq!(
+            mouse_background_navigation_bytes(GridPoint { row: 8, col: 0 }),
+            Some(b"\x1b[D".to_vec())
+        );
+        assert_eq!(
+            mouse_background_navigation_bytes(GridPoint { row: 4, col: 30 }),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            mouse_background_navigation_bytes(GridPoint { row: 18, col: 30 }),
+            Some(b"\x1b[6~".to_vec())
+        );
+        assert_eq!(
+            mouse_background_navigation_bytes(GridPoint { row: 8, col: 10 }),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_entry_click_point_uses_visible_text_range() {
+        let mut terminal = Terminal::new(24, 80);
+        put_ascii(&mut terminal, 5, 12, "Re: title");
+
+        assert!(is_mouse_entry_click_point(
+            &terminal,
+            GridPoint { row: 5, col: 12 }
+        ));
+        assert!(is_mouse_entry_click_point(
+            &terminal,
+            GridPoint { row: 5, col: 38 }
+        ));
+        assert!(!is_mouse_entry_click_point(
+            &terminal,
+            GridPoint { row: 5, col: 60 }
+        ));
+        assert!(!is_mouse_entry_click_point(
+            &terminal,
+            GridPoint { row: 2, col: 12 }
+        ));
+    }
 
     #[test]
     fn control_letter_sends_ascii_control_code() {
@@ -1512,6 +1714,14 @@ mod tests {
             super::cell_background_color(&cell),
             egui::Color32::from_rgb(229, 229, 229)
         );
+    }
+
+    #[test]
+    fn cursor_rect_is_bottom_underline_not_full_cell() {
+        let rect = cursor_underline_rect(egui::pos2(10.0, 20.0), 18.0, 35.0, 2);
+
+        assert_eq!(rect.min, egui::pos2(10.0, 20.0 + 35.0 - 2.0));
+        assert_eq!(rect.size(), egui::vec2(18.0 * 2.0, 2.0));
     }
 
     #[test]
@@ -1806,16 +2016,31 @@ fn paint_terminal(
     let cursor_x = geometry.rect.min.x + cursor_col as f32 * geometry.cell_width;
     let cursor_y = geometry.rect.min.y + term.cursor_row as f32 * geometry.cell_height;
     painter.rect_filled(
-        egui::Rect::from_min_size(
+        cursor_underline_rect(
             egui::pos2(cursor_x, cursor_y),
-            egui::vec2(
-                geometry.cell_width * cursor_width as f32,
-                geometry.cell_height,
-            ),
+            geometry.cell_width,
+            geometry.cell_height,
+            cursor_width,
         ),
         0.0,
         egui::Color32::from_rgb(200, 200, 200),
     );
+}
+
+fn cursor_underline_rect(
+    cell_pos: egui::Pos2,
+    cell_width: f32,
+    cell_height: f32,
+    cursor_width: u8,
+) -> egui::Rect {
+    const CURSOR_UNDERLINE_HEIGHT: f32 = 2.0;
+    egui::Rect::from_min_size(
+        egui::pos2(
+            cell_pos.x,
+            cell_pos.y + cell_height - CURSOR_UNDERLINE_HEIGHT,
+        ),
+        egui::vec2(cell_width * cursor_width as f32, CURSOR_UNDERLINE_HEIGHT),
+    )
 }
 
 #[derive(Clone, Copy)]
