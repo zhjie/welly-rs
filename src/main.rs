@@ -389,6 +389,7 @@ impl eframe::App for App {
             )
             .show(ctx, |ui| {
                 let terminal_response = render_terminal(ui, &self.terminal, self.selection);
+                self.handle_terminal_url_click(&terminal_response);
                 self.handle_terminal_selection(ctx, &terminal_response);
                 self.render_attachment_button(ui);
                 if !self.connected
@@ -637,6 +638,37 @@ impl App {
         if ctx.input(|input| input.key_pressed(egui::Key::C) && input.modifiers.command) {
             self.copy_selection(ctx);
         }
+
+        if terminal_response
+            .response
+            .double_clicked_by(egui::PointerButton::Primary)
+        {
+            self.open_selected_url();
+        }
+    }
+
+    fn handle_terminal_url_click(&self, terminal_response: &TerminalResponse) {
+        let Some(point) = terminal_response.hover_grid_point() else {
+            return;
+        };
+
+        let url = {
+            let terminal = self.terminal.lock().unwrap();
+            url_at_grid_point(&terminal, point)
+        };
+
+        if let Some(url) = url {
+            terminal_response
+                .response
+                .ctx
+                .set_cursor_icon(egui::CursorIcon::PointingHand);
+            if terminal_response
+                .response
+                .clicked_by(egui::PointerButton::Primary)
+            {
+                open_url(&url);
+            }
+        }
     }
 
     fn copy_selection(&self, ctx: &egui::Context) -> bool {
@@ -655,6 +687,24 @@ impl App {
 
         ctx.copy_text(text);
         true
+    }
+
+    fn open_selected_url(&self) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+
+        let url = {
+            let terminal = self.terminal.lock().unwrap();
+            normalize_selected_url_for_open(&selected_text(&terminal, selection))
+        };
+
+        if let Some(url) = url {
+            open_url(&url);
+            true
+        } else {
+            false
+        }
     }
 
     fn send_bytes(&self, bytes: Vec<u8>) {
@@ -718,13 +768,13 @@ fn attachment_button_label(attachment: &ImageAttachment, count: usize) -> String
 
 fn open_image_attachments(attachments: &[ImageAttachment]) {
     for attachment in attachments {
-        if let Err(error) = Command::new("open").arg(&attachment.image_url).spawn() {
-            log::error!(
-                "Failed to open image attachment {}: {}",
-                attachment.image_url,
-                error
-            );
-        }
+        open_url(&attachment.image_url);
+    }
+}
+
+fn open_url(url: &str) {
+    if let Err(error) = Command::new("open").arg(url).spawn() {
+        log::error!("Failed to open URL {}: {}", url, error);
     }
 }
 
@@ -773,6 +823,18 @@ struct TerminalResponse {
 impl TerminalResponse {
     fn interact_grid_point(&self) -> Option<GridPoint> {
         let pos = self.response.interact_pointer_pos()?;
+        pos_to_grid_point(
+            pos,
+            self.rect,
+            self.cell_width,
+            self.cell_height,
+            self.rows,
+            self.cols,
+        )
+    }
+
+    fn hover_grid_point(&self) -> Option<GridPoint> {
+        let pos = self.response.hover_pos()?;
         pos_to_grid_point(
             pos,
             self.rect,
@@ -839,6 +901,170 @@ fn terminal_screen_text(term: &Terminal) -> String {
         },
     };
     selected_text(term, selection)
+}
+
+fn url_at_grid_point(term: &Terminal, point: GridPoint) -> Option<String> {
+    if point.row >= term.rows || point.col >= term.cols {
+        return None;
+    }
+
+    let row = &term.grid[point.row];
+    let mut text = String::new();
+    let mut char_cells = Vec::new();
+    for (col, cell) in row.iter().enumerate() {
+        if cell.width == 0 {
+            continue;
+        }
+
+        let start_byte = text.len();
+        text.push(cell.ch);
+        char_cells.push(VisibleCharCell {
+            start_byte,
+            end_byte: text.len(),
+            start_col: col,
+            end_col: col + cell.width.max(1) as usize - 1,
+        });
+    }
+
+    for start in http_url_starts(&text) {
+        let mut end = text[start..]
+            .char_indices()
+            .find_map(|(offset, ch)| ch.is_whitespace().then_some(start + offset))
+            .unwrap_or(text.len());
+        while end > start {
+            let Some(ch) = text[..end].chars().next_back() else {
+                break;
+            };
+            if !is_trailing_url_punctuation(ch) {
+                break;
+            }
+            end -= ch.len_utf8();
+        }
+
+        if start == end {
+            continue;
+        }
+
+        let Some(start_cell) = char_cells.iter().find(|cell| cell.start_byte == start) else {
+            continue;
+        };
+        let Some(end_cell) = char_cells
+            .iter()
+            .rev()
+            .find(|cell| cell.end_byte <= end && cell.start_byte >= start)
+        else {
+            continue;
+        };
+
+        if (start_cell.start_col..=end_cell.end_col).contains(&point.col) {
+            return Some(text[start..end].to_owned());
+        }
+    }
+
+    None
+}
+
+#[derive(Clone, Copy)]
+struct VisibleCharCell {
+    start_byte: usize,
+    end_byte: usize,
+    start_col: usize,
+    end_col: usize,
+}
+
+fn http_url_starts(text: &str) -> Vec<usize> {
+    let mut starts: Vec<usize> = text
+        .match_indices("https://")
+        .map(|(index, _)| index)
+        .collect();
+    starts.extend(text.match_indices("http://").map(|(index, _)| index));
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+fn is_trailing_url_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | ')'
+            | ']'
+            | '}'
+            | '>'
+            | '"'
+            | '\''
+            | '。'
+            | '，'
+            | '；'
+            | '：'
+            | '！'
+            | '？'
+            | '）'
+            | '】'
+            | '》'
+            | '”'
+            | '’'
+    )
+}
+
+fn normalize_selected_url_for_open(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    let trimmed = trim_url_trailing_punctuation(trimmed);
+    if is_scheme_url(trimmed) {
+        return Some(trimmed.to_owned());
+    }
+
+    if looks_like_scheme_less_url(trimmed) {
+        return Some(format!("https://{trimmed}"));
+    }
+
+    None
+}
+
+fn trim_url_trailing_punctuation(mut text: &str) -> &str {
+    while let Some(ch) = text.chars().next_back() {
+        if !is_trailing_url_punctuation(ch) {
+            break;
+        }
+        text = &text[..text.len() - ch.len_utf8()];
+    }
+    text
+}
+
+fn is_scheme_url(text: &str) -> bool {
+    text.starts_with("http://") || text.starts_with("https://")
+}
+
+fn looks_like_scheme_less_url(text: &str) -> bool {
+    if text.contains('@') || text.starts_with('.') || text.ends_with('.') {
+        return false;
+    }
+
+    let Some(host) = text.split(['/', '?', '#']).next() else {
+        return false;
+    };
+    if !host.contains('.') {
+        return false;
+    }
+
+    host.split('.').all(is_valid_domain_label)
+}
+
+fn is_valid_domain_label(label: &str) -> bool {
+    !label.is_empty()
+        && label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
 }
 
 fn terminal_event_to_bytes(event: &egui::Event) -> Option<Vec<u8>> {
@@ -990,9 +1216,10 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_font_candidate, handle_zoom_shortcut, key_event_to_bytes, selected_text,
-        terminal_aspect_fit_size, terminal_event_to_bytes, terminal_render_scale,
-        terminal_size_for_zoom, FontCandidate, GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
+        choose_font_candidate, handle_zoom_shortcut, key_event_to_bytes,
+        normalize_selected_url_for_open, selected_text, terminal_aspect_fit_size,
+        terminal_event_to_bytes, terminal_render_scale, terminal_size_for_zoom, FontCandidate,
+        GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
     };
     use crate::terminal::Terminal;
 
@@ -1336,6 +1563,67 @@ mod tests {
         );
 
         assert_eq!(text, "中A");
+    }
+
+    #[test]
+    fn url_at_grid_point_detects_http_url_on_same_line() {
+        let mut terminal = Terminal::new(2, 40);
+        put_ascii(&mut terminal, 0, 3, "see https://example.com/path now");
+
+        let url = super::url_at_grid_point(&terminal, GridPoint { row: 0, col: 12 });
+
+        assert_eq!(url.as_deref(), Some("https://example.com/path"));
+    }
+
+    #[test]
+    fn url_at_grid_point_trims_trailing_sentence_punctuation() {
+        let mut terminal = Terminal::new(1, 40);
+        put_ascii(&mut terminal, 0, 0, "https://example.com/test).");
+
+        let url = super::url_at_grid_point(&terminal, GridPoint { row: 0, col: 5 });
+
+        assert_eq!(url.as_deref(), Some("https://example.com/test"));
+    }
+
+    #[test]
+    fn url_at_grid_point_ignores_non_url_cells() {
+        let mut terminal = Terminal::new(1, 40);
+        put_ascii(&mut terminal, 0, 0, "plain https://example.com");
+
+        assert_eq!(
+            super::url_at_grid_point(&terminal, GridPoint { row: 0, col: 2 }),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_url_without_scheme_gets_https_scheme() {
+        assert_eq!(
+            normalize_selected_url_for_open("www.example.com/path"),
+            Some("https://www.example.com/path".to_owned())
+        );
+        assert_eq!(
+            normalize_selected_url_for_open("example.com/path"),
+            Some("https://example.com/path".to_owned())
+        );
+    }
+
+    #[test]
+    fn selected_url_keeps_existing_http_scheme() {
+        assert_eq!(
+            normalize_selected_url_for_open("http://example.com"),
+            Some("http://example.com".to_owned())
+        );
+        assert_eq!(
+            normalize_selected_url_for_open("https://example.com"),
+            Some("https://example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn selected_url_rejects_plain_words_and_email_addresses() {
+        assert_eq!(normalize_selected_url_for_open("example"), None);
+        assert_eq!(normalize_selected_url_for_open("user@example.com"), None);
     }
 
     fn put_ascii(terminal: &mut Terminal, row: usize, col: usize, text: &str) {

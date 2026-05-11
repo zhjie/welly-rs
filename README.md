@@ -33,6 +33,10 @@ Then run:
 cargo run
 ```
 
+HTTP(S) URLs on the terminal screen are clickable. Select a URL-like text
+without `http://` or `https://`, then double-click the selection to open it with
+`https://`.
+
 ## Current Status
 
 - Native GUI built with `eframe`/`egui`.
@@ -41,7 +45,8 @@ cargo run
 - ANSI/CSI parsing for common terminal control sequences.
 - Welly-like 80x24 layout, font metrics, colors, reverse video, and VT100 art.
 - Welly-style keyboard shortcuts for basic navigation.
-- Chinese IME input, mouse selection/copy, anti-idle keepalive, and image attachment opening.
+- Chinese IME input, mouse selection/copy, anti-idle keepalive, clickable URLs,
+  and image attachment opening.
 
 ## Roadmap
 
@@ -56,22 +61,17 @@ cargo run
    Pay special attention to fonts, IME behavior, keyboard modifiers, browser
    opening, and `~/.ssh/config` / SSH config equivalents.
 
-2. Recognize links and make them clickable.
-
-   Image attachments are already detected from article footers. Plain article
-   links and other URLs should share the same hotspot/click path later.
-
-3. Consider a minimal settings UI.
+2. Consider a minimal settings UI.
 
    Keep this optional. The preferred login path is still SSH config plus manual
    login when no config exists.
 
-4. Consider OS-level credential storage only.
+3. Consider OS-level credential storage only.
 
    Do not store passwords in plaintext. If password persistence is ever added,
    use the operating system keychain/credential manager.
 
-5. Future Ideas
+4. Future Ideas
 
    Expose a headless Welly-rs backend for alternative frontends, such as an Emacs
    client. The Rust backend should own SSH, decoding, ANSI parsing, and the
