@@ -429,7 +429,7 @@ fn char_width(ch: char) -> u8 {
     if is_welly_ascii_art_symbol(ch) {
         2
     } else {
-        unicode_width::UnicodeWidthChar::width(ch)
+        unicode_width::UnicodeWidthChar::width_cjk(ch)
             .unwrap_or(1)
             .max(1) as u8
     }
@@ -488,6 +488,21 @@ mod tests {
             assert_eq!(terminal.cursor_col, 2, "{ch} should advance by two cells");
             assert_eq!(terminal.grid[0][0].ch, ch);
             assert_eq!(terminal.grid[0][0].width, 2);
+            assert_eq!(terminal.grid[0][1].width, 0);
+        }
+    }
+
+    #[test]
+    fn cjk_punctuation_occupies_two_cells() {
+        for ch in ['“', '”', '‘', '’', '…'] {
+            let mut terminal = Terminal::new(1, 4);
+
+            terminal.put_char(ch);
+
+            assert_eq!(terminal.cursor_col, 2, "{ch} should advance by two cells");
+            assert_eq!(terminal.grid[0][0].ch, ch);
+            assert_eq!(terminal.grid[0][0].width, 2);
+            assert_eq!(terminal.grid[0][1].ch, '\0');
             assert_eq!(terminal.grid[0][1].width, 0);
         }
     }
