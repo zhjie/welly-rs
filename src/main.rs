@@ -819,8 +819,47 @@ fn open_image_attachments(attachments: &[ImageAttachment]) {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct OpenUrlCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+fn open_url_command(url: &str) -> OpenUrlCommand {
+    #[cfg(target_os = "windows")]
+    {
+        return OpenUrlCommand {
+            program: "rundll32.exe",
+            args: vec!["url.dll,FileProtocolHandler".to_owned(), url.to_owned()],
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return OpenUrlCommand {
+            program: "open",
+            args: vec![url.to_owned()],
+        };
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return OpenUrlCommand {
+            program: "xdg-open",
+            args: vec![url.to_owned()],
+        };
+    }
+
+    #[allow(unreachable_code)]
+    OpenUrlCommand {
+        program: "open",
+        args: vec![url.to_owned()],
+    }
+}
+
 fn open_url(url: &str) {
-    if let Err(error) = Command::new("open").arg(url).spawn() {
+    let command = open_url_command(url);
+    if let Err(error) = Command::new(command.program).args(&command.args).spawn() {
         log::error!("Failed to open URL {}: {}", url, error);
     }
 }
@@ -1834,6 +1873,45 @@ mod tests {
     fn selected_url_rejects_plain_words_and_email_addresses() {
         assert_eq!(normalize_selected_url_for_open("example"), None);
         assert_eq!(normalize_selected_url_for_open("user@example.com"), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn open_url_command_uses_windows_url_protocol_handler() {
+        assert_eq!(
+            super::open_url_command("https://example.com/path?a=1&b=2"),
+            super::OpenUrlCommand {
+                program: "rundll32.exe",
+                args: vec![
+                    "url.dll,FileProtocolHandler".to_owned(),
+                    "https://example.com/path?a=1&b=2".to_owned(),
+                ],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_url_command_uses_macos_open() {
+        assert_eq!(
+            super::open_url_command("https://example.com/path"),
+            super::OpenUrlCommand {
+                program: "open",
+                args: vec!["https://example.com/path".to_owned()],
+            }
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn open_url_command_uses_xdg_open_on_unix_desktops() {
+        assert_eq!(
+            super::open_url_command("https://example.com/path"),
+            super::OpenUrlCommand {
+                program: "xdg-open",
+                args: vec!["https://example.com/path".to_owned()],
+            }
+        );
     }
 
     fn put_ascii(terminal: &mut Terminal, row: usize, col: usize, text: &str) {
