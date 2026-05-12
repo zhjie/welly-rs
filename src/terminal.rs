@@ -154,8 +154,9 @@ impl Terminal {
         for c in (col..(self.cols - width)).rev() {
             self.grid[row][c + width] = self.grid[row][c];
         }
+        let blank = self.blank_cell_for_current_background();
         for c in col..(col + width) {
-            self.grid[row][c] = Cell::default();
+            self.grid[row][c] = blank;
         }
         self.write_cell(row, col, ch, width as u8);
         self.sanitize_row(row);
@@ -189,10 +190,18 @@ impl Terminal {
         }
     }
 
+    fn blank_cell_for_current_background(&self) -> Cell {
+        Cell {
+            bg_color: self.bg_color,
+            ..Default::default()
+        }
+    }
+
     fn clear_cell_range(&mut self, row: usize, start: usize, end: usize) {
         let (start, end) = self.expand_range_for_wide_cells(row, start, end);
+        let blank = self.blank_cell_for_current_background();
         for col in start..end {
-            self.grid[row][col] = Cell::default();
+            self.grid[row][col] = blank;
         }
     }
 
@@ -391,8 +400,9 @@ impl Terminal {
         for c in col..(self.cols - n) {
             self.grid[row][c] = self.grid[row][c + n];
         }
+        let blank = self.blank_cell_for_current_background();
         for c in (self.cols - n)..self.cols {
-            self.grid[row][c] = Cell::default();
+            self.grid[row][c] = blank;
         }
         self.sanitize_row(row);
         self.dirty = true;
@@ -464,6 +474,7 @@ fn is_welly_ascii_art_symbol(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Terminal;
+    use crate::cell::Color;
 
     #[test]
     fn ascii_art_symbols_occupy_two_cells() {
@@ -562,6 +573,56 @@ mod tests {
         assert_eq!(terminal.grid[0][0].ch, 'A');
         assert_eq!(terminal.grid[0][0].width, 1);
         assert_eq!(terminal.grid[0][1], Default::default());
+    }
+
+    #[test]
+    fn clear_line_preserves_current_background_on_blanks() {
+        let mut terminal = Terminal::new(1, 6);
+
+        terminal.bg_color = Color::Red;
+        terminal.put_char('M');
+        terminal.put_char('a');
+        terminal.set_cursor(0, 0);
+        terminal.clear_line(super::ClearLineMode::All);
+
+        assert_eq!(terminal.grid[0][0].ch, ' ');
+        assert_eq!(terminal.grid[0][0].bg_color, Color::Red);
+        assert_eq!(terminal.grid[0][1].bg_color, Color::Red);
+    }
+
+    #[test]
+    fn delete_chars_preserves_current_background_on_revealed_blanks() {
+        let mut terminal = Terminal::new(1, 5);
+
+        terminal.bg_color = Color::Red;
+        for ch in "abcde".chars() {
+            terminal.put_char(ch);
+        }
+        terminal.set_cursor(0, 1);
+        terminal.delete_chars(2);
+
+        assert_eq!(row_text(&terminal, 0), "ade  ");
+        assert_eq!(terminal.grid[0][3].bg_color, Color::Red);
+        assert_eq!(terminal.grid[0][4].bg_color, Color::Red);
+    }
+
+    #[test]
+    fn overwriting_double_width_half_preserves_current_background() {
+        let mut terminal = Terminal::new(1, 4);
+
+        terminal.bg_color = Color::Red;
+        terminal.put_char('表');
+        terminal.set_cursor(0, 1);
+        terminal.put_char('A');
+
+        assert_eq!(terminal.grid[0][0].ch, ' ');
+        assert_eq!(terminal.grid[0][0].bg_color, Color::Red);
+        assert_eq!(terminal.grid[0][1].ch, 'A');
+        assert_eq!(terminal.grid[0][1].bg_color, Color::Red);
+    }
+
+    fn row_text(terminal: &Terminal, row: usize) -> String {
+        terminal.grid[row].iter().map(|cell| cell.ch).collect()
     }
 }
 
