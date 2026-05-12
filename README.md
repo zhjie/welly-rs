@@ -105,6 +105,16 @@ scripts/build-macos-dmg.sh
 open target/release/bundle/macos/Welly-rs.dmg
 ```
 
+Build a local Windows zip package from PowerShell:
+
+```powershell
+.\scripts\build-windows-zip.ps1
+```
+
+The zip is written to `target\release\bundle\windows\Welly-rs-windows.zip`.
+Pass `-Target x86_64-pc-windows-msvc` when building for an explicit Windows
+Rust target.
+
 ## License
 
 Welly-rs is licensed under the GNU General Public License, version 3 or later.
