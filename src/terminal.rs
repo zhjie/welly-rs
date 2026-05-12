@@ -120,10 +120,10 @@ impl Terminal {
             }
 
             self.cursor_col = 0;
-            self.cursor_row += 1;
-            if self.cursor_row > self.scroll_bottom {
+            if self.cursor_row == self.scroll_bottom {
                 self.scroll_up(1);
-                self.cursor_row = self.scroll_bottom;
+            } else if self.cursor_row < self.rows - 1 {
+                self.cursor_row += 1;
             }
         }
 
@@ -298,10 +298,10 @@ impl Terminal {
         if self.line_feed_new_line_mode {
             self.cursor_col = 0;
         }
-        self.cursor_row += 1;
-        if self.cursor_row > self.scroll_bottom {
+        if self.cursor_row == self.scroll_bottom {
             self.scroll_up(1);
-            self.cursor_row = self.scroll_bottom;
+        } else if self.cursor_row < self.rows - 1 {
+            self.cursor_row += 1;
         }
         self.dirty = true;
     }
@@ -358,6 +358,7 @@ impl Terminal {
         self.scroll_top = top.min(self.rows - 1);
         self.scroll_bottom = bottom.min(self.rows - 1);
         if self.scroll_top >= self.scroll_bottom {
+            self.scroll_top = 0;
             self.scroll_bottom = self.rows - 1;
         }
     }

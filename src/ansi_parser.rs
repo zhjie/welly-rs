@@ -290,7 +290,13 @@ impl AnsiParser {
                 let top = self.get_param(0, 1) as usize;
                 let bottom = self.get_param(1, terminal.rows as i64) as usize;
                 terminal.set_scroll_region(top.saturating_sub(1), bottom.saturating_sub(1));
-                terminal.set_cursor(terminal.scroll_top, 0);
+                // DECSTBM homes the cursor: top-left absolute in normal mode,
+                // top of scroll region in origin mode.
+                if terminal.origin_mode {
+                    terminal.set_cursor(terminal.scroll_top, 0);
+                } else {
+                    terminal.set_cursor(0, 0);
+                }
                 self.state = ParserState::Normal;
             }
             's' => {
@@ -620,14 +626,31 @@ mod tests {
     }
 
     #[test]
-    fn csi_scroll_region_moves_cursor_to_region_top() {
+    fn csi_scroll_region_homes_cursor_to_absolute_top_left_in_normal_mode() {
         let mut parser = AnsiParser::new();
         let mut terminal = Terminal::new(24, 80);
 
+        // Move cursor away first, then set scroll region
         parser.feed_bytes(b"\x1b[10;20r", &mut terminal);
 
         assert_eq!(terminal.scroll_top, 9);
         assert_eq!(terminal.scroll_bottom, 19);
+        // VT100: DECSTBM homes cursor to (0,0) absolute in normal mode
+        assert_eq!(terminal.cursor_row, 0);
+        assert_eq!(terminal.cursor_col, 0);
+    }
+
+    #[test]
+    fn csi_scroll_region_homes_cursor_to_scroll_top_in_origin_mode() {
+        let mut parser = AnsiParser::new();
+        let mut terminal = Terminal::new(24, 80);
+
+        // Enable origin mode, then set scroll region
+        parser.feed_bytes(b"\x1b[?6h\x1b[10;20r", &mut terminal);
+
+        assert_eq!(terminal.scroll_top, 9);
+        assert_eq!(terminal.scroll_bottom, 19);
+        // VT100: DECSTBM homes cursor to scroll_top in origin mode
         assert_eq!(terminal.cursor_row, 9);
         assert_eq!(terminal.cursor_col, 0);
     }

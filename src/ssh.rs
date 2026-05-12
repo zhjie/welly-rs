@@ -55,11 +55,9 @@ impl SshClient {
 
         let connected = Arc::clone(&client_arc.connected);
         tokio::spawn(async move {
-            log::info!("Starting SSH data receive loop");
             loop {
                 match channel.wait().await {
                     Some(ChannelMsg::Data { data }) => {
-                        log::debug!("Received {} bytes", data.len());
                         {
                             let mut parser = parser.lock().unwrap();
                             let mut term = terminal.lock().unwrap();
@@ -68,7 +66,6 @@ impl SshClient {
                         ctx.request_repaint();
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        log::debug!("Received extended data: {} bytes", data.len());
                         {
                             let mut parser = parser.lock().unwrap();
                             let mut term = terminal.lock().unwrap();

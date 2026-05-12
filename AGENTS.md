@@ -119,4 +119,26 @@ The Welly source reference lives at `/Users/zhjie/workspace/src/welly` when avai
 
 Use concise imperative commit subjects, for example `Add parser tests for erase sequences`.
 
+## Known Bug Investigation Log
+
+### 状态栏行消失（2025-05-12）
+
+**现象**：主选单和帖子正文页面的 row=0（版面/时间信息）和 row=23（用户名/时间/信件状态）有时不显示，时间越长越容易触发，具有 heisenbug 特征（加了诊断代码后反而不出现）。
+
+**BBS 协议分析**：通过原始数据 dump（`src/ssh.rs` 写入 `%TEMP%\welly-rs-raw.bin`，分析脚本 `scripts/analyze_dump.py`）确认：
+- newsmth BBS **不使用 DECSTBM** 滚动区域，scroll_top/scroll_bottom 在正常会话中始终为默认值（0/23）。
+- BBS 更新 row=0 的典型模式：绝对定位到 row=23（`ESC[24;NH]`）→ 相对上移（`ESC[23A]` 或组合上移）→ `CR` → `ESC[K`（清行）→ 写内容 → `LF`。
+- 相对上移（`ESC[nA`）是关键——它依赖终端的 `cursor_row` 与 BBS 预期完全一致；若 `cursor_row` 偏大，上移后落在错误行，状态栏被写到错误位置。
+- BBS 在弹出框场景下会清空 row=0/row=1 而**不立即重写**（`ESC[2;25H]` → `ESC[A]` → `CR` → `ESC[K]` → `LF` → `ESC[K]`），这是正常行为，弹出框关闭后会恢复。
+
+**已修复的 VT100 规范问题**（可能间接相关）：
+1. `DECSTBM`（`ESC[r]`）处理：设置滚动区域后，normal mode 应将光标 home 到 (0,0)，origin mode 应 home 到 scroll_top。之前的代码无论哪种模式都 home 到 scroll_top。
+2. `line_feed`：光标在 scroll_bottom 以下时不应触发 scroll，之前会在任何位置 LF 都可能 scroll。
+3. `put_char` autowrap：同上，wrap 后移行只在 `cursor_row == scroll_bottom` 时才 scroll。
+4. `set_scroll_region`：参数无效时重置为全屏，之前可能设置 top >= bottom 的非法区域。
+
+**heisenbug 假说**：BBS 的"清行 → 写内容"可能被拆成两个 TCP 包。`ssh.rs` 每收到一个 `ChannelMsg::Data` 就立即 `ctx.request_repaint()`，若两包之间恰好触发渲染，屏幕会短暂显示清空后的空行。是否"卡住"取决于第二包是否正常到达。加了磁盘 dump 后写入延迟可能让两包合并，解释了为何加诊断后 bug 消失。
+
+**待确认**：需要在 bug 实际出现时捕获 dump 并用 `scripts/analyze_dump.py` 分析，确认哪次 `ERASE LINE row=0` 之后没有对应的写入序列。如需重新开启诊断，在 `src/ssh.rs` 的数据接收循环中恢复 dump 写入，在 `src/main.rs` 的 `main()` 中恢复文件日志。
+
 Pull requests should include a short summary, test results (`cargo test`, `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`), and screenshots or recordings for visible UI changes. Link related issues when available and call out any networking, authentication, or platform-specific assumptions.
