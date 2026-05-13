@@ -54,23 +54,28 @@ impl SshClient {
         channel.request_shell(true).await?;
 
         let connected = Arc::clone(&client_arc.connected);
+        let session_for_loop = Arc::clone(&client_arc.session);
         tokio::spawn(async move {
             loop {
                 match channel.wait().await {
                     Some(ChannelMsg::Data { data }) => {
-                        {
+                        let output = {
                             let mut parser = parser.lock().unwrap();
                             let mut term = terminal.lock().unwrap();
                             parser.feed_bytes(&data, &mut term);
-                        }
+                            parser.take_output()
+                        };
+                        send_parser_output(&session_for_loop, channel_id, output, &connected).await;
                         ctx.request_repaint();
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        {
+                        let output = {
                             let mut parser = parser.lock().unwrap();
                             let mut term = terminal.lock().unwrap();
                             parser.feed_bytes(&data, &mut term);
-                        }
+                            parser.take_output()
+                        };
+                        send_parser_output(&session_for_loop, channel_id, output, &connected).await;
                         ctx.request_repaint();
                     }
                     Some(ChannelMsg::Eof) => {
@@ -146,6 +151,29 @@ pub fn is_channel_closed_error(error: &russh::Error) -> bool {
 
 fn anti_idle_due(last_send_at: Instant, now: Instant) -> bool {
     now.duration_since(last_send_at) >= ANTI_IDLE_THRESHOLD
+}
+
+async fn send_parser_output(
+    session: &tokio::sync::Mutex<client::Handle<Client>>,
+    channel_id: ChannelId,
+    output: Vec<Vec<u8>>,
+    connected: &AtomicBool,
+) {
+    if output.is_empty() {
+        return;
+    }
+
+    let session = session.lock().await;
+    for bytes in output {
+        if let Err(e) = session
+            .data(channel_id, bytes::Bytes::copy_from_slice(&bytes))
+            .await
+        {
+            log::debug!("Failed to send terminal response: {:?}", e);
+            connected.store(false, Ordering::SeqCst);
+            break;
+        }
+    }
 }
 
 struct Client {}

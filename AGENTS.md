@@ -139,6 +139,16 @@ Use concise imperative commit subjects, for example `Add parser tests for erase 
 
 **heisenbug 假说**：BBS 的"清行 → 写内容"可能被拆成两个 TCP 包。`ssh.rs` 每收到一个 `ChannelMsg::Data` 就立即 `ctx.request_repaint()`，若两包之间恰好触发渲染，屏幕会短暂显示清空后的空行。是否"卡住"取决于第二包是否正常到达。加了磁盘 dump 后写入延迟可能让两包合并，解释了为何加诊断后 bug 消失。
 
-**待确认**：需要在 bug 实际出现时捕获 dump 并用 `scripts/analyze_dump.py` 分析，确认哪次 `ERASE LINE row=0` 之后没有对应的写入序列。如需重新开启诊断，在 `src/ssh.rs` 的数据接收循环中恢复 dump 写入，在 `src/main.rs` 的 `main()` 中恢复文件日志。
+**2026-05-13 复现观察**：
+- 截图 `QQ20260513-012630.png` 显示 row=23 的静态标签仍在，但动态字段 `时间[...]` 和 `使用者[...]` 为空，说明不是整行完全消失，也不像单纯字体渲染问题。
+- 开启 raw dump 后现象消失，用户判断很可能是写盘导致性能下降或时序延迟，从而掩盖 bug；不要把“开 dump 正常”当作修复证据。
+- 曾临时尝试将数据包后的 repaint 合并为约 8ms 延迟，未开 raw dump 时重启后暂时正常；但该方案目前按用户要求已关闭，不作为当前修复。
+- 当前保留的改动是对齐 Welly 参考实现：支持 DA/DSR 终端查询响应（如 `ESC[0c`、`ESC[5n`、`ESC[6n`）并通过 SSH channel 回写；这属于兼容性修复，不能单独证明状态栏 heisenbug 已根治。
+
+**当前诊断方式**：诊断代码默认关闭。需要抓证据时，用环境变量显式开启：
+`WELLY_RS_RAW_DUMP=/private/tmp/welly-rs-raw.bin WELLY_RS_TRACE_DUMP=/private/tmp/welly-rs-trace.txt cargo run`。
+注意：raw/trace 写盘本身可能改变时序并掩盖问题。若 dump 下无法复现，优先考虑低开销环形内存 trace 或仅在异常检测时落盘，而不是继续依赖持续写盘。
+
+**待确认**：需要在 bug 实际出现且尽量不扰动时序的情况下捕获证据，确认哪次 `ERASE LINE row=0/23` 之后没有对应写入，或确认服务端动态字段是否依赖 DA/DSR/CPR 响应。
 
 Pull requests should include a short summary, test results (`cargo test`, `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`), and screenshots or recordings for visible UI changes. Link related issues when available and call out any networking, authentication, or platform-specific assumptions.

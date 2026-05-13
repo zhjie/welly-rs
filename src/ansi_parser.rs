@@ -21,6 +21,7 @@ pub struct AnsiParser {
     private_mode: bool,
     osc_string: String,
     charset: u8,
+    output: Vec<Vec<u8>>,
 }
 
 impl AnsiParser {
@@ -34,6 +35,7 @@ impl AnsiParser {
             private_mode: false,
             osc_string: String::new(),
             charset: b'B',
+            output: Vec::new(),
         }
     }
 
@@ -46,6 +48,10 @@ impl AnsiParser {
 
     pub fn feed_bytes(&mut self, data: &[u8], terminal: &mut Terminal) {
         self.feed(data, terminal);
+    }
+
+    pub fn take_output(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.output)
     }
 
     fn process_char(&mut self, ch: char, terminal: &mut Terminal) {
@@ -286,6 +292,14 @@ impl AnsiParser {
                 self.process_sgr(terminal);
                 self.state = ParserState::Normal;
             }
+            'n' => {
+                self.process_device_status_report(terminal);
+                self.state = ParserState::Normal;
+            }
+            'c' => {
+                self.process_device_attributes();
+                self.state = ParserState::Normal;
+            }
             'r' => {
                 let top = self.get_param(0, 1) as usize;
                 let bottom = self.get_param(1, terminal.rows as i64) as usize;
@@ -455,6 +469,27 @@ impl AnsiParser {
                 _ => {}
             }
             i += 1;
+        }
+    }
+
+    fn process_device_status_report(&mut self, terminal: &Terminal) {
+        match self.get_param(0, 0) {
+            5 => self.output.push(b"\x1b[0n".to_vec()),
+            6 => self.output.push(
+                format!(
+                    "\x1b[{};{}R",
+                    terminal.cursor_row + 1,
+                    terminal.cursor_col + 1
+                )
+                .into_bytes(),
+            ),
+            _ => {}
+        }
+    }
+
+    fn process_device_attributes(&mut self) {
+        if self.params.is_empty() || self.get_param(0, 0) == 0 {
+            self.output.push(b"\x1b[?1;0c".to_vec());
         }
     }
 
@@ -679,5 +714,36 @@ mod tests {
         assert_eq!(terminal.grid[0][2].ch, ' ');
         assert_eq!(terminal.cursor_row, 0);
         assert_eq!(terminal.cursor_col, 0);
+    }
+
+    #[test]
+    fn csi_device_status_report_replies_device_ok() {
+        let mut parser = AnsiParser::new();
+        let mut terminal = Terminal::new(24, 80);
+
+        parser.feed_bytes(b"\x1b[5n", &mut terminal);
+
+        assert_eq!(parser.take_output(), vec![b"\x1b[0n".to_vec()]);
+    }
+
+    #[test]
+    fn csi_device_status_report_replies_cursor_position() {
+        let mut parser = AnsiParser::new();
+        let mut terminal = Terminal::new(24, 80);
+        terminal.set_cursor(22, 10);
+
+        parser.feed_bytes(b"\x1b[6n", &mut terminal);
+
+        assert_eq!(parser.take_output(), vec![b"\x1b[23;11R".to_vec()]);
+    }
+
+    #[test]
+    fn csi_device_attributes_replies_vt100_identity() {
+        let mut parser = AnsiParser::new();
+        let mut terminal = Terminal::new(24, 80);
+
+        parser.feed_bytes(b"\x1b[0c", &mut terminal);
+
+        assert_eq!(parser.take_output(), vec![b"\x1b[?1;0c".to_vec()]);
     }
 }

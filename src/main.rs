@@ -2202,7 +2202,7 @@ fn visible_cell_at(row: &[cell::Cell], col: usize) -> &cell::Cell {
 
 fn cell_background_color(cell: &cell::Cell) -> egui::Color32 {
     if cell.reverse {
-        foreground_color(cell.fg_color)
+        foreground_color(cell.fg_color, false)
     } else {
         background_color(cell.bg_color)
     }
@@ -2210,23 +2210,45 @@ fn cell_background_color(cell: &cell::Cell) -> egui::Color32 {
 
 fn cell_foreground_color(cell: &cell::Cell) -> egui::Color32 {
     if cell.reverse {
-        background_color(cell.bg_color)
+        let bg = match cell.bg_color {
+            cell::Color::Default => cell::Color::Black,
+            _ => cell.bg_color,
+        };
+        brighten(bg, cell.bold).egui_color()
     } else {
-        foreground_color(cell.fg_color)
+        foreground_color(cell.fg_color, cell.bold)
     }
 }
 
-fn foreground_color(color: cell::Color) -> egui::Color32 {
-    match color {
-        cell::Color::Default => cell::Color::White.egui_color(),
-        _ => color.egui_color(),
-    }
+fn foreground_color(color: cell::Color, bold: bool) -> egui::Color32 {
+    let base = match color {
+        cell::Color::Default => cell::Color::White,
+        _ => color,
+    };
+    brighten(base, bold).egui_color()
 }
 
 fn background_color(color: cell::Color) -> egui::Color32 {
     match color {
         cell::Color::Default => egui::Color32::BLACK,
         _ => color.egui_color(),
+    }
+}
+
+fn brighten(color: cell::Color, bold: bool) -> cell::Color {
+    if !bold {
+        return color;
+    }
+    match color {
+        cell::Color::Black => cell::Color::BrightBlack,
+        cell::Color::Red => cell::Color::BrightRed,
+        cell::Color::Green => cell::Color::BrightGreen,
+        cell::Color::Yellow => cell::Color::BrightYellow,
+        cell::Color::Blue => cell::Color::BrightBlue,
+        cell::Color::Magenta => cell::Color::BrightMagenta,
+        cell::Color::Cyan => cell::Color::BrightCyan,
+        cell::Color::White => cell::Color::BrightWhite,
+        _ => color,
     }
 }
 
