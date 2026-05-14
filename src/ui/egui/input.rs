@@ -1,33 +1,7 @@
 //! egui → backend input translation.
 
 use crate::backend::input::{InputEvent, Key, KeyEvent, Modifiers, MouseEvent, WheelDir};
-use crate::backend::{keys, mouse};
 use eframe::egui;
-use encoding_rs::GB18030;
-
-/// **Transitional** (kept until E2): translate an egui event directly
-/// into the bytes that should be sent to SSH. Internally routes through
-/// `input_event_for_egui_event`; existing App call sites use this
-/// wrapper. After E2 lands, App calls `input_event_for_egui_event` and
-/// hands the result to `Backend::send_input`, and this wrapper is
-/// deleted.
-pub fn bytes_for_egui_event(event: &egui::Event) -> Option<Vec<u8>> {
-    let input = input_event_for_egui_event(event)?;
-    match input {
-        InputEvent::Key(k) => keys::bytes_for_key(k),
-        InputEvent::Mouse(MouseEvent::Wheel(d)) => Some(mouse::bytes_for_wheel(d)),
-        InputEvent::Mouse(MouseEvent::Click(_)) => None, // App handles clicks separately
-        InputEvent::Paste(text) => {
-            if text.is_empty() || text.chars().any(char::is_control) {
-                None
-            } else {
-                let (b, _, _) = GB18030.encode(&text);
-                Some(b.into_owned())
-            }
-        }
-        _ => None,
-    }
-}
 
 /// Translate an egui event to the corresponding `InputEvent`, or `None`
 /// if it isn't a forwardable input. Mouse clicks are NOT handled here —
