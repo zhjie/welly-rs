@@ -1,16 +1,12 @@
 use crate::backend::snapshot::TerminalSnapshot;
 use eframe::egui;
 
+pub use crate::backend::input::GridPoint;
+
 // Terminal grid dimensions are duplicated from main.rs constants to keep
 // this module from depending on main. They are an invariant of the Welly
 // experience, not a tunable.
 const TERMINAL_COLS: usize = 80;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GridPoint {
-    pub row: usize,
-    pub col: usize,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
