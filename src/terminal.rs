@@ -1,4 +1,4 @@
-use crate::cell::{Cell, Color};
+use crate::backend::cell::{Cell, Color};
 
 pub struct Terminal {
     pub rows: usize,
@@ -475,7 +475,7 @@ fn is_welly_ascii_art_symbol(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Terminal;
-    use crate::cell::Color;
+    use crate::backend::cell::Color;
 
     #[test]
     fn ascii_art_symbols_occupy_two_cells() {

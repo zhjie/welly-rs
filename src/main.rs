@@ -64,13 +64,13 @@ const CHINESE_FONT_CANDIDATES: &[FontCandidate] = &[
 mod ansi_parser;
 mod attachment;
 mod backend;
-mod cell;
 mod config;
 mod ssh;
 mod terminal;
 
 use ansi_parser::AnsiParser;
 use attachment::{parse_image_attachments, ImageAttachment};
+use backend::cell;
 use config::ConnectionSettings;
 use encoding_rs::GB18030;
 use ssh::{is_channel_closed_error, SshClient};
