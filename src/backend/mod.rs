@@ -9,3 +9,4 @@ pub mod terminal;
 pub mod attachment;
 pub mod ansi_parser;
 pub mod ssh;
+pub mod input;
