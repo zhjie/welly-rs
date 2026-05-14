@@ -1,4 +1,4 @@
-use crate::ansi_parser::AnsiParser;
+use crate::backend::ansi_parser::AnsiParser;
 use crate::config::ConnectionSettings;
 use crate::backend::terminal::Terminal;
 use russh::*;

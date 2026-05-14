@@ -61,14 +61,13 @@ const CHINESE_FONT_CANDIDATES: &[FontCandidate] = &[
     },
 ];
 
-mod ansi_parser;
-mod attachment;
+
 mod backend;
 mod config;
 mod ssh;
 
-use ansi_parser::AnsiParser;
-use attachment::{parse_image_attachments, ImageAttachment};
+use backend::ansi_parser::AnsiParser;
+use backend::attachment::{parse_image_attachments, ImageAttachment};
 use backend::cell;
 use config::ConnectionSettings;
 use encoding_rs::GB18030;
@@ -1585,7 +1584,7 @@ mod tests {
 
     #[test]
     fn attachment_button_label_opens_all_detected_images() {
-        let attachment = crate::attachment::ImageAttachment {
+        let attachment = crate::backend::attachment::ImageAttachment {
             filename: "first.png".to_owned(),
             size: "12 KB".to_owned(),
             image_url: "https://www.newsmth.net/att.php?first.png".to_owned(),
