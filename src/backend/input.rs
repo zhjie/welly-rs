@@ -75,7 +75,7 @@ pub enum MouseEvent {
     Click(GridPoint),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),

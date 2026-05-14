@@ -29,7 +29,7 @@ use backend::ansi_parser::AnsiParser;
 use backend::attachment::{parse_image_attachments, ImageAttachment};
 use backend::cell;
 use config::ConnectionSettings;
-use encoding_rs::GB18030;
+use ui::egui::input::bytes_for_egui_event;
 use backend::ssh::{is_channel_closed_error, SshClient};
 use backend::terminal::Terminal;
 
@@ -396,8 +396,8 @@ impl App {
                 egui::Event::Copy => {
                     self.copy_selection(ctx);
                 }
-                egui::Event::MouseWheel { delta, .. } => {
-                    if let Some(bytes) = mouse_wheel_to_bytes(delta) {
+                egui::Event::MouseWheel { .. } => {
+                    if let Some(bytes) = bytes_for_egui_event(&event) {
                         self.selection = None;
                         self.send_bytes(bytes);
                     }
@@ -429,13 +429,13 @@ impl App {
                         continue;
                     }
 
-                    if let Some(bytes) = terminal_event_to_bytes(&event) {
+                    if let Some(bytes) = bytes_for_egui_event(&event) {
                         self.selection = None;
                         self.send_bytes(bytes);
                     }
                 }
                 egui::Event::Text(_) | egui::Event::Ime(_) => {
-                    if let Some(bytes) = terminal_event_to_bytes(&event) {
+                    if let Some(bytes) = bytes_for_egui_event(&event) {
                         self.selection = None;
                         self.send_bytes(bytes);
                     }
@@ -715,23 +715,7 @@ fn grid_index(point: GridPoint) -> usize {
     point.row * TERMINAL_COLS + point.col
 }
 
-fn mouse_wheel_to_bytes(delta: egui::Vec2) -> Option<Vec<u8>> {
-    if delta.y.abs() >= delta.x.abs() && delta.y != 0.0 {
-        if delta.y > 0.0 {
-            Some(b"\x1b[A".to_vec())
-        } else {
-            Some(b"\x1b[B".to_vec())
-        }
-    } else if delta.x != 0.0 {
-        if delta.x > 0.0 {
-            Some(b"\x1b[D".to_vec())
-        } else {
-            Some(b"\x1b[C".to_vec())
-        }
-    } else {
-        None
-    }
-}
+
 
 fn mouse_entry_click_to_bytes(cursor_row: usize, target_row: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -1046,111 +1030,7 @@ fn is_valid_domain_label(label: &str) -> bool {
         && !label.ends_with('-')
 }
 
-fn terminal_event_to_bytes(event: &egui::Event) -> Option<Vec<u8>> {
-    match event {
-        egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } => key_event_to_bytes(*key, *modifiers),
-        egui::Event::Text(text) => text_to_bytes(text),
-        egui::Event::Ime(egui::ImeEvent::Commit(text)) => text_to_bytes(text),
-        _ => None,
-    }
-}
 
-fn text_to_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.is_empty() || text.chars().any(char::is_control) {
-        None
-    } else {
-        let (bytes, _, _) = GB18030.encode(text);
-        Some(bytes.into_owned())
-    }
-}
-
-fn key_event_to_bytes(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<u8>> {
-    // On macOS, `command` is the ⌘ key (ctrl=false). On Windows/Linux, `command`
-    // is an alias for ctrl (so both command and ctrl are true). Only block when it
-    // is a true macOS Command shortcut (command=true, ctrl=false) to avoid
-    // accidentally eating Windows Ctrl+key sequences.
-    if modifiers.command && !modifiers.ctrl {
-        return None;
-    }
-
-    if modifiers.ctrl && !modifiers.alt {
-        return control_key_to_bytes(key);
-    }
-
-    if modifiers.alt {
-        return alt_key_to_bytes(key);
-    }
-
-    match key {
-        egui::Key::Enter => Some(vec![b'\r']),
-        egui::Key::Backspace => Some(vec![0x7f]),
-        egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
-        egui::Key::Tab => Some(vec![b'\t']),
-        egui::Key::Escape => Some(vec![0x1b]),
-        egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
-        egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
-        egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
-        egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
-        egui::Key::Home => Some(b"\x1b[1~".to_vec()),
-        egui::Key::End => Some(b"\x1b[4~".to_vec()),
-        egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
-        egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
-        _ => None,
-    }
-}
-
-fn control_key_to_bytes(key: egui::Key) -> Option<Vec<u8>> {
-    let byte = match key {
-        egui::Key::A => 0x01,
-        egui::Key::B => 0x02,
-        egui::Key::C => 0x03,
-        egui::Key::D => 0x04,
-        egui::Key::E => 0x05,
-        egui::Key::F => 0x06,
-        egui::Key::G => 0x07,
-        egui::Key::H | egui::Key::Backspace => 0x08,
-        egui::Key::I | egui::Key::Tab => 0x09,
-        egui::Key::J => 0x0a,
-        egui::Key::K => 0x0b,
-        egui::Key::L => 0x0c,
-        egui::Key::M | egui::Key::Enter => 0x0d,
-        egui::Key::N => 0x0e,
-        egui::Key::O => 0x0f,
-        egui::Key::P => 0x10,
-        egui::Key::Q => 0x11,
-        egui::Key::R => 0x12,
-        egui::Key::S => 0x13,
-        egui::Key::T => 0x14,
-        egui::Key::U => 0x15,
-        egui::Key::V => 0x16,
-        egui::Key::W => 0x17,
-        egui::Key::X => 0x18,
-        egui::Key::Y => 0x19,
-        egui::Key::Z => 0x1a,
-        egui::Key::OpenBracket | egui::Key::Escape => 0x1b,
-        egui::Key::Backslash => 0x1c,
-        egui::Key::CloseBracket => 0x1d,
-        egui::Key::Num6 => 0x1e,
-        egui::Key::Minus => 0x1f,
-        _ => return None,
-    };
-    Some(vec![byte])
-}
-
-fn alt_key_to_bytes(key: egui::Key) -> Option<Vec<u8>> {
-    match key {
-        egui::Key::ArrowUp => Some(b"\x1b[5~".to_vec()),
-        egui::Key::ArrowDown => Some(b"\x1b[6~".to_vec()),
-        egui::Key::ArrowRight => Some(b"\x1b[4~".to_vec()),
-        egui::Key::ArrowLeft => Some(b"\x1b[1~".to_vec()),
-        _ => None,
-    }
-}
 
 fn handle_zoom_shortcut(zoom: &mut f32, key: egui::Key, modifiers: egui::Modifiers) -> bool {
     if !modifiers.command || modifiers.alt || modifiers.ctrl {
@@ -1196,36 +1076,13 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 mod tests {
     use super::{
         cursor_underline_rect, handle_zoom_shortcut,
-        is_mouse_entry_click_point, key_event_to_bytes, mouse_background_navigation_bytes,
-        mouse_entry_click_to_bytes, mouse_wheel_to_bytes, normalize_selected_url_for_open,
-        selected_text, terminal_aspect_fit_size, terminal_event_to_bytes, terminal_render_scale,
+        is_mouse_entry_click_point, mouse_background_navigation_bytes,
+        mouse_entry_click_to_bytes, normalize_selected_url_for_open,
+        selected_text, terminal_aspect_fit_size, terminal_render_scale,
         terminal_size_for_zoom, GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
     };
     use crate::backend::terminal::Terminal;
 
-    #[test]
-    fn mouse_wheel_vertical_maps_to_welly_arrows() {
-        assert_eq!(
-            mouse_wheel_to_bytes(egui::vec2(0.0, 12.0)),
-            Some(b"\x1b[A".to_vec())
-        );
-        assert_eq!(
-            mouse_wheel_to_bytes(egui::vec2(0.0, -12.0)),
-            Some(b"\x1b[B".to_vec())
-        );
-    }
-
-    #[test]
-    fn mouse_wheel_horizontal_maps_to_welly_arrows() {
-        assert_eq!(
-            mouse_wheel_to_bytes(egui::vec2(12.0, 0.0)),
-            Some(b"\x1b[D".to_vec())
-        );
-        assert_eq!(
-            mouse_wheel_to_bytes(egui::vec2(-12.0, 0.0)),
-            Some(b"\x1b[C".to_vec())
-        );
-    }
 
     #[test]
     fn mouse_entry_click_moves_cursor_to_row_and_enters() {
@@ -1282,49 +1139,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn control_letter_sends_ascii_control_code() {
-        assert_eq!(
-            key_event_to_bytes(egui::Key::G, egui::Modifiers::CTRL),
-            Some(vec![0x07])
-        );
-        assert_eq!(
-            key_event_to_bytes(egui::Key::K, egui::Modifiers::CTRL),
-            Some(vec![0x0b])
-        );
-        assert_eq!(
-            key_event_to_bytes(egui::Key::Enter, egui::Modifiers::CTRL),
-            Some(vec![0x0d])
-        );
-    }
-
-    #[test]
-    fn alt_arrows_match_welly_navigation_shortcuts() {
-        assert_eq!(
-            key_event_to_bytes(egui::Key::ArrowUp, egui::Modifiers::ALT),
-            Some(b"\x1b[5~".to_vec())
-        );
-        assert_eq!(
-            key_event_to_bytes(egui::Key::ArrowDown, egui::Modifiers::ALT),
-            Some(b"\x1b[6~".to_vec())
-        );
-        assert_eq!(
-            key_event_to_bytes(egui::Key::ArrowRight, egui::Modifiers::ALT),
-            Some(b"\x1b[4~".to_vec())
-        );
-        assert_eq!(
-            key_event_to_bytes(egui::Key::ArrowLeft, egui::Modifiers::ALT),
-            Some(b"\x1b[1~".to_vec())
-        );
-    }
-
-    #[test]
-    fn command_shortcuts_are_not_sent_to_bbs() {
-        assert_eq!(
-            key_event_to_bytes(egui::Key::G, egui::Modifiers::COMMAND),
-            None
-        );
-    }
 
     #[test]
     fn command_plus_minus_adjust_zoom_without_sending_to_bbs() {
@@ -1408,38 +1222,6 @@ mod tests {
             "打开 3 张图"
         );
     }
-
-    #[test]
-    fn ime_commit_sends_committed_text() {
-        let event = egui::Event::Ime(egui::ImeEvent::Commit("中文".to_owned()));
-
-        assert_eq!(
-            terminal_event_to_bytes(&event),
-            Some(vec![0xd6, 0xd0, 0xce, 0xc4])
-        );
-    }
-
-    #[test]
-    fn text_events_do_not_send_control_characters() {
-        assert_eq!(
-            terminal_event_to_bytes(&egui::Event::Text("\u{0b}".to_owned())),
-            None
-        );
-        assert_eq!(
-            terminal_event_to_bytes(&egui::Event::Ime(egui::ImeEvent::Commit(
-                "\u{0b}".to_owned()
-            ))),
-            None
-        );
-    }
-
-
-
-
-
-
-
-
 
     #[test]
     fn text_position_uses_cell_top_margin() {
