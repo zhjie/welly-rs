@@ -49,31 +49,32 @@ pub enum Color {
 }
 
 impl Color {
-    pub fn egui_color(self) -> egui::Color32 {
+    /// Returns the 8-bit RGB triple this color renders as. UI-toolkit-neutral.
+    pub fn rgb(self) -> (u8, u8, u8) {
         match self {
-            Color::Default => egui::Color32::WHITE,
-            Color::Black => egui::Color32::from_rgb(0, 0, 0),
-            Color::Red => egui::Color32::from_rgb(205, 0, 0),
-            Color::Green => egui::Color32::from_rgb(0, 205, 0),
-            Color::Yellow => egui::Color32::from_rgb(205, 205, 0),
-            Color::Blue => egui::Color32::from_rgb(0, 0, 238),
-            Color::Magenta => egui::Color32::from_rgb(205, 0, 205),
-            Color::Cyan => egui::Color32::from_rgb(0, 205, 205),
-            Color::White => egui::Color32::from_rgb(229, 229, 229),
-            Color::BrightBlack => egui::Color32::from_rgb(127, 127, 127),
-            Color::BrightRed => egui::Color32::from_rgb(255, 0, 0),
-            Color::BrightGreen => egui::Color32::from_rgb(0, 255, 0),
-            Color::BrightYellow => egui::Color32::from_rgb(255, 255, 0),
-            Color::BrightBlue => egui::Color32::from_rgb(92, 92, 255),
-            Color::BrightMagenta => egui::Color32::from_rgb(255, 0, 255),
-            Color::BrightCyan => egui::Color32::from_rgb(0, 255, 255),
-            Color::BrightWhite => egui::Color32::from_rgb(255, 255, 255),
-            Color::Indexed(i) => Self::indexed_to_rgb(i),
-            Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
+            Color::Default => (255, 255, 255),
+            Color::Black => (0, 0, 0),
+            Color::Red => (205, 0, 0),
+            Color::Green => (0, 205, 0),
+            Color::Yellow => (205, 205, 0),
+            Color::Blue => (0, 0, 238),
+            Color::Magenta => (205, 0, 205),
+            Color::Cyan => (0, 205, 205),
+            Color::White => (229, 229, 229),
+            Color::BrightBlack => (127, 127, 127),
+            Color::BrightRed => (255, 0, 0),
+            Color::BrightGreen => (0, 255, 0),
+            Color::BrightYellow => (255, 255, 0),
+            Color::BrightBlue => (92, 92, 255),
+            Color::BrightMagenta => (255, 0, 255),
+            Color::BrightCyan => (0, 255, 255),
+            Color::BrightWhite => (255, 255, 255),
+            Color::Indexed(i) => Self::indexed_rgb(i),
+            Color::Rgb(r, g, b) => (r, g, b),
         }
     }
 
-    fn indexed_to_rgb(index: u8) -> egui::Color32 {
+    fn indexed_rgb(index: u8) -> (u8, u8, u8) {
         match index {
             0..=15 => {
                 let colors = [
@@ -94,18 +95,18 @@ impl Color {
                     Color::BrightCyan,
                     Color::BrightWhite,
                 ];
-                colors[index as usize].egui_color()
+                colors[index as usize].rgb()
             }
             16..=231 => {
                 let idx = index - 16;
                 let r = (idx / 36) * 51;
                 let g = ((idx % 36) / 6) * 51;
                 let b = (idx % 6) * 51;
-                egui::Color32::from_rgb(r, g, b)
+                (r, g, b)
             }
             232..=255 => {
                 let gray = (index - 232) * 10 + 8;
-                egui::Color32::from_rgb(gray, gray, gray)
+                (gray, gray, gray)
             }
         }
     }

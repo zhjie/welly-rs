@@ -79,6 +79,11 @@ type ConnectResult = Result<Arc<SshClient>, String>;
 type ConnectSender = Sender<ConnectResult>;
 type ConnectReceiver = Receiver<ConnectResult>;
 
+fn color_to_egui(color: cell::Color) -> egui::Color32 {
+    let (r, g, b) = color.rgb();
+    egui::Color32::from_rgb(r, g, b)
+}
+
 #[derive(Clone, Copy)]
 struct FontCandidate {
     egui_name: &'static str,
@@ -2214,7 +2219,7 @@ fn cell_foreground_color(cell: &cell::Cell) -> egui::Color32 {
             cell::Color::Default => cell::Color::Black,
             _ => cell.bg_color,
         };
-        brighten(bg, cell.bold).egui_color()
+        color_to_egui(brighten(bg, cell.bold))
     } else {
         foreground_color(cell.fg_color, cell.bold)
     }
@@ -2225,13 +2230,13 @@ fn foreground_color(color: cell::Color, bold: bool) -> egui::Color32 {
         cell::Color::Default => cell::Color::White,
         _ => color,
     };
-    brighten(base, bold).egui_color()
+    color_to_egui(brighten(base, bold))
 }
 
 fn background_color(color: cell::Color) -> egui::Color32 {
     match color {
         cell::Color::Default => egui::Color32::BLACK,
-        _ => color.egui_color(),
+        _ => color_to_egui(color),
     }
 }
 
