@@ -457,14 +457,16 @@ impl App {
         let terminal = Arc::clone(&self.terminal);
         let parser = Arc::clone(&self.parser);
         let settings = self.settings.clone();
-        let ctx = ctx.clone();
+        let ctx_for_notify = ctx.clone();
+        let notify: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || ctx_for_notify.request_repaint());
         let (tx, rx): (ConnectSender, ConnectReceiver) = crossbeam_channel::bounded(1);
         self.connect_rx = Some(rx);
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                match SshClient::connect(settings, terminal, parser, ctx).await {
+                match SshClient::connect(settings, terminal, parser, notify).await {
                     Ok(client) => {
                         log::info!("SSH connected successfully");
                         let _ = tx.send(Ok(client));

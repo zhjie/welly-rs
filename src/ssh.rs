@@ -22,7 +22,7 @@ impl SshClient {
         settings: ConnectionSettings,
         terminal: Arc<Mutex<Terminal>>,
         parser: Arc<Mutex<AnsiParser>>,
-        ctx: eframe::egui::Context,
+        notify: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Arc<Self>, russh::Error> {
         let config = client::Config {
             inactivity_timeout: Some(std::time::Duration::from_secs(300)),
@@ -66,7 +66,7 @@ impl SshClient {
                             parser.take_output()
                         };
                         send_parser_output(&session_for_loop, channel_id, output, &connected).await;
-                        ctx.request_repaint();
+                        notify();
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
                         let output = {
@@ -76,7 +76,7 @@ impl SshClient {
                             parser.take_output()
                         };
                         send_parser_output(&session_for_loop, channel_id, output, &connected).await;
-                        ctx.request_repaint();
+                        notify();
                     }
                     Some(ChannelMsg::Eof) => {
                         log::info!("SSH channel EOF");
