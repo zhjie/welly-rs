@@ -10,3 +10,4 @@ pub mod attachment;
 pub mod ansi_parser;
 pub mod ssh;
 pub mod input;
+pub mod keys;
