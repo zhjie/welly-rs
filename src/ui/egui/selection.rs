@@ -354,10 +354,7 @@ mod tests {
         put_ascii(&mut terminal, 0, 0, "plain https://example.com");
 
         let snap = terminal.snapshot();
-        assert_eq!(
-            url_at_grid_point(&snap, GridPoint { row: 0, col: 2 }),
-            None
-        );
+        assert_eq!(url_at_grid_point(&snap, GridPoint { row: 0, col: 2 }), None);
     }
 
     #[test]

@@ -152,7 +152,10 @@ pub fn load_system_font_db() -> fontdb::Database {
     db
 }
 
-pub fn choose_font_candidate<F>(candidates: &[FontCandidate], is_available: F) -> Option<FontCandidate>
+pub fn choose_font_candidate<F>(
+    candidates: &[FontCandidate],
+    is_available: F,
+) -> Option<FontCandidate>
 where
     F: Fn(&str) -> bool,
 {
@@ -162,13 +165,19 @@ where
         .find(|candidate| candidate.families.iter().any(|family| is_available(family)))
 }
 
-pub fn load_font_candidate(db: &fontdb::Database, candidates: &[FontCandidate]) -> Option<LoadedFont> {
+pub fn load_font_candidate(
+    db: &fontdb::Database,
+    candidates: &[FontCandidate],
+) -> Option<LoadedFont> {
     let candidate =
         choose_font_candidate(candidates, |family| query_font_family(db, family).is_some())?;
     load_candidate_font_data(db, candidate)
 }
 
-pub fn load_candidate_font_data(db: &fontdb::Database, candidate: FontCandidate) -> Option<LoadedFont> {
+pub fn load_candidate_font_data(
+    db: &fontdb::Database,
+    candidate: FontCandidate,
+) -> Option<LoadedFont> {
     for family in candidate.families {
         if let Some(id) = query_font_family(db, family) {
             let Some(face) = db.face(id) else {
@@ -206,14 +215,8 @@ mod tests {
 
     #[test]
     fn font_sizes_follow_welly_default_proportions() {
-        assert_eq!(
-            CHINESE_FONT_SIZE,
-            (35.0_f32 * 22.0_f32 / 24.0).round()
-        );
-        assert_eq!(
-            ENGLISH_FONT_SIZE,
-            (35.0_f32 * 18.0_f32 / 24.0).round()
-        );
+        assert_eq!(CHINESE_FONT_SIZE, (35.0_f32 * 22.0_f32 / 24.0).round());
+        assert_eq!(ENGLISH_FONT_SIZE, (35.0_f32 * 18.0_f32 / 24.0).round());
     }
 
     #[test]
@@ -224,10 +227,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            font_for_cell(&cell),
-            (ENGLISH_FONT_NAME, ENGLISH_FONT_SIZE)
-        );
+        assert_eq!(font_for_cell(&cell), (ENGLISH_FONT_NAME, ENGLISH_FONT_SIZE));
     }
 
     #[test]
@@ -238,10 +238,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            font_for_cell(&cell),
-            (CHINESE_FONT_NAME, CHINESE_FONT_SIZE)
-        );
+        assert_eq!(font_for_cell(&cell), (CHINESE_FONT_NAME, CHINESE_FONT_SIZE));
     }
 
     #[test]

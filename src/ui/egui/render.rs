@@ -1,8 +1,7 @@
 use crate::backend::cell::{self, Cell};
 use crate::backend::snapshot::TerminalSnapshot;
 use crate::ui::egui::fonts::{
-    font_for_cell, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN, ENGLISH_LEFT_MARGIN,
-    ENGLISH_TOP_MARGIN,
+    font_for_cell, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN, ENGLISH_LEFT_MARGIN, ENGLISH_TOP_MARGIN,
 };
 use crate::ui::egui::selection::{pos_to_grid_point, GridPoint, Selection};
 use eframe::egui;
@@ -27,12 +26,26 @@ pub struct TerminalResponse {
 impl TerminalResponse {
     pub fn interact_grid_point(&self) -> Option<GridPoint> {
         let pos = self.response.interact_pointer_pos()?;
-        pos_to_grid_point(pos, self.rect, self.cell_width, self.cell_height, self.rows, self.cols)
+        pos_to_grid_point(
+            pos,
+            self.rect,
+            self.cell_width,
+            self.cell_height,
+            self.rows,
+            self.cols,
+        )
     }
 
     pub fn hover_grid_point(&self) -> Option<GridPoint> {
         let pos = self.response.hover_pos()?;
-        pos_to_grid_point(pos, self.rect, self.cell_width, self.cell_height, self.rows, self.cols)
+        pos_to_grid_point(
+            pos,
+            self.rect,
+            self.cell_width,
+            self.cell_height,
+            self.rows,
+            self.cols,
+        )
     }
 }
 
@@ -56,8 +69,12 @@ pub fn render_terminal(
     selection: Option<Selection>,
 ) -> TerminalResponse {
     let available_size = ui.available_size();
-    let render_scale =
-        terminal_render_scale(available_size.x, available_size.y, snap.cols, snap.row_count);
+    let render_scale = terminal_render_scale(
+        available_size.x,
+        available_size.y,
+        snap.cols,
+        snap.row_count,
+    );
     let cell_width = CELL_WIDTH * render_scale;
     let cell_height = CELL_HEIGHT * render_scale;
     let total_width = snap.cols as f32 * cell_width;
@@ -149,7 +166,14 @@ fn paint_terminal(
         geometry.cell_height,
     );
     if let Some(sel) = selection {
-        paint_selection(snap, sel, geometry.rect, &painter, geometry.cell_width, geometry.cell_height);
+        paint_selection(
+            snap,
+            sel,
+            geometry.rect,
+            &painter,
+            geometry.cell_width,
+            geometry.cell_height,
+        );
     }
 
     for row in 0..snap.row_count {

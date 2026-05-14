@@ -605,8 +605,8 @@ fn is_csi_final_byte(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::AnsiParser;
     use super::super::terminal::Terminal;
+    use super::AnsiParser;
 
     #[test]
     fn vertical_tab_advances_to_next_line() {

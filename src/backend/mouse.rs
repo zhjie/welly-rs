@@ -90,8 +90,14 @@ mod tests {
 
     #[test]
     fn entry_click_moves_cursor_to_row_and_enters() {
-        assert_eq!(bytes_for_entry_click(3, 6), b"\x1b[B\x1b[B\x1b[B\r".to_vec());
-        assert_eq!(bytes_for_entry_click(6, 3), b"\x1b[A\x1b[A\x1b[A\r".to_vec());
+        assert_eq!(
+            bytes_for_entry_click(3, 6),
+            b"\x1b[B\x1b[B\x1b[B\r".to_vec()
+        );
+        assert_eq!(
+            bytes_for_entry_click(6, 3),
+            b"\x1b[A\x1b[A\x1b[A\r".to_vec()
+        );
     }
 
     #[test]

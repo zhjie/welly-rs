@@ -1,6 +1,6 @@
 use super::ansi_parser::AnsiParser;
-use crate::config::ConnectionSettings;
 use super::terminal::Terminal;
+use crate::config::ConnectionSettings;
 use russh::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

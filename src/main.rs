@@ -3,35 +3,73 @@
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
+use std::future::Future;
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 const ZOOM_STEP: f32 = 1.05;
 const APP_ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/welly-rs-app-icon.rgba"));
 
-
-
 mod backend;
-mod ui;
 mod config;
+mod ui;
 
 use ui::egui::fonts::*;
 use ui::egui::input::bytes_for_egui_event;
-use ui::egui::render::{render_terminal, TerminalResponse, CELL_WIDTH, CELL_HEIGHT, TERMINAL_COLS, TERMINAL_ROWS, MIN_ZOOM, MAX_ZOOM};
-use ui::egui::selection::{GridPoint, Selection, normalize_selected_url_for_open, selected_text, terminal_screen_text, url_at_grid_point};
+use ui::egui::render::{
+    render_terminal, TerminalResponse, CELL_HEIGHT, CELL_WIDTH, MAX_ZOOM, MIN_ZOOM, TERMINAL_COLS,
+    TERMINAL_ROWS,
+};
+use ui::egui::selection::{
+    normalize_selected_url_for_open, selected_text, terminal_screen_text, url_at_grid_point,
+    GridPoint, Selection,
+};
 
 use backend::ansi_parser::AnsiParser;
 use backend::attachment::{parse_image_attachments, ImageAttachment};
-use config::ConnectionSettings;
 use backend::ssh::{is_channel_closed_error, SshClient};
 use backend::terminal::Terminal;
+use config::ConnectionSettings;
 
 type ConnectResult = Result<Arc<SshClient>, String>;
 type ConnectSender = Sender<ConnectResult>;
 type ConnectReceiver = Receiver<ConnectResult>;
+type SendFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type SendJob = Box<dyn FnOnce() -> SendFuture + Send + 'static>;
 
+struct SendWorker {
+    tx: Sender<SendJob>,
+    _thread: JoinHandle<()>,
+}
 
+impl SendWorker {
+    fn spawn() -> Self {
+        let (tx, rx): (Sender<SendJob>, Receiver<SendJob>) = crossbeam_channel::unbounded();
+        let thread = spawn_send_worker(rx);
+        Self {
+            tx,
+            _thread: thread,
+        }
+    }
+
+    fn send(&self, job: SendJob) {
+        if let Err(error) = self.tx.send(job) {
+            log::debug!("Send worker stopped before accepting job: {}", error);
+        }
+    }
+}
+
+fn spawn_send_worker(rx: Receiver<SendJob>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for job in rx {
+            rt.block_on(job());
+        }
+    })
+}
 
 fn app_icon() -> Arc<egui::IconData> {
     static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
@@ -69,7 +107,6 @@ fn decode_rgba_icon(bytes: &[u8]) -> Option<egui::IconData> {
     })
 }
 
-
 fn main() -> eframe::Result {
     env_logger::init();
 
@@ -99,7 +136,6 @@ fn main() -> eframe::Result {
     )
 }
 
-
 fn configure_terminal_view(ctx: &egui::Context) {
     ctx.options_mut(|options| {
         options.zoom_with_keyboard = false;
@@ -126,6 +162,7 @@ struct App {
     pending_inner_size: Option<egui::Vec2>,
     last_inner_size: Option<egui::Vec2>,
     configured_viewport: bool,
+    send_worker: SendWorker,
 }
 
 impl Default for App {
@@ -154,6 +191,7 @@ impl Default for App {
             pending_inner_size: None,
             last_inner_size: None,
             configured_viewport: false,
+            send_worker: SendWorker::spawn(),
         }
     }
 }
@@ -573,9 +611,8 @@ impl App {
             }
 
             let client = Arc::clone(client);
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
+            self.send_worker.send(Box::new(move || {
+                Box::pin(async move {
                     if let Err(e) = client.send_data(&bytes).await {
                         if is_channel_closed_error(&e) {
                             log::debug!("Ignoring send after SSH channel ended: {}", e);
@@ -583,8 +620,8 @@ impl App {
                             log::error!("Send error: {}", e);
                         }
                     }
-                });
-            });
+                })
+            }));
         }
     }
 
@@ -676,8 +713,6 @@ fn open_url(url: &str) {
     }
 }
 
-
-
 fn mouse_entry_click_to_bytes(cursor_row: usize, target_row: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
     if target_row > cursor_row {
@@ -735,8 +770,6 @@ fn mouse_background_navigation_bytes(point: GridPoint) -> Option<Vec<u8>> {
     None
 }
 
-
-
 fn handle_zoom_shortcut(zoom: &mut f32, key: egui::Key, modifiers: egui::Modifiers) -> bool {
     if !modifiers.command || modifiers.alt || modifiers.ctrl {
         return false;
@@ -779,15 +812,16 @@ fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_zoom_shortcut,
-        is_mouse_entry_click_point, mouse_background_navigation_bytes,
-        mouse_entry_click_to_bytes, terminal_aspect_fit_size,
-        terminal_size_for_zoom,
+    use super::{
+        handle_zoom_shortcut, is_mouse_entry_click_point, mouse_background_navigation_bytes,
+        mouse_entry_click_to_bytes, terminal_aspect_fit_size, terminal_size_for_zoom,
     };
     use crate::backend::terminal::Terminal;
-    use crate::ui::egui::render::{terminal_render_scale, TERMINAL_COLS, TERMINAL_ROWS, CELL_WIDTH, CELL_HEIGHT, MIN_ZOOM};
+    use crate::ui::egui::render::{
+        terminal_render_scale, CELL_HEIGHT, CELL_WIDTH, MIN_ZOOM, TERMINAL_COLS, TERMINAL_ROWS,
+    };
     use crate::ui::egui::selection::GridPoint;
-
+    use std::thread::ThreadId;
 
     #[test]
     fn mouse_entry_click_moves_cursor_to_row_and_enters() {
@@ -920,6 +954,37 @@ mod tests {
     }
 
     #[test]
+    fn send_worker_reuses_one_thread_for_queued_jobs() {
+        let (job_tx, job_rx): (crossbeam_channel::Sender<super::SendJob>, _) =
+            crossbeam_channel::unbounded();
+        let worker = super::spawn_send_worker(job_rx);
+        let (seen_tx, seen_rx) = crossbeam_channel::unbounded::<(usize, ThreadId)>();
+
+        for index in 0..3 {
+            let seen_tx = seen_tx.clone();
+            job_tx
+                .send(Box::new(move || {
+                    Box::pin(async move {
+                        seen_tx.send((index, std::thread::current().id())).unwrap();
+                    })
+                }))
+                .unwrap();
+        }
+
+        drop(seen_tx);
+        drop(job_tx);
+        worker.join().unwrap();
+
+        let seen: Vec<_> = seen_rx.iter().collect();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            seen.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert!(seen.windows(2).all(|window| window[0].1 == window[1].1));
+    }
+
+    #[test]
     fn attachment_button_label_opens_all_detected_images() {
         let attachment = crate::backend::attachment::ImageAttachment {
             filename: "first.png".to_owned(),
@@ -934,7 +999,7 @@ mod tests {
         );
     }
 
-#[cfg(target_os = "windows")]
+    #[cfg(target_os = "windows")]
     #[test]
     fn open_url_command_uses_windows_url_protocol_handler() {
         assert_eq!(
@@ -973,4 +1038,3 @@ mod tests {
         );
     }
 }
-
