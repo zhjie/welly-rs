@@ -75,8 +75,8 @@ src/
 **`Backend` 暴露的方法**（API 表面，不是 trait）：
 ```rust
 impl Backend {
-    pub fn new(config: ConnectionSettings) -> Self;
-    pub fn snapshot(&self) -> &TerminalSnapshot;       // borrow，不 clone
+    pub fn new(config: ConnectionSettings, notify: Arc<dyn Fn() + Send + Sync>) -> Self;
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&TerminalSnapshot<'_>) -> R) -> R;
     pub fn send_input(&self, event: InputEvent);
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()>;
     pub fn reconnect(&self);
@@ -84,7 +84,11 @@ impl Backend {
 }
 ```
 
-**`TerminalSnapshot` 是「渲染前」的只读数据结构**——它是 Backend 暴露给 Frontend 的「终端当前状态」视图（行、cell、光标、标题、attachment）。Frontend 读它、画出像素；Backend 不知道它会被怎么画。它本身不是渲染结果，也不脱离当前进程（不加 `Serialize`）。
+**关于 `with_snapshot`**：`TerminalSnapshot<'a>` 借用 `Terminal` 内部的行数据，而 `Terminal` 在 Backend 内部锁后面。安全 Rust 不允许 Backend 「返回一个绑定到自己锁 guard 的借用」（自引用），所以 snapshot 用闭包式 API：调用方在闭包内拿到 `&TerminalSnapshot`，闭包返回时锁释放。这是为了零 clone 渲染又不引入 unsafe / `ouroboros` 的折中。
+
+**`TerminalSnapshot` 是「渲染前」的只读数据结构**——它是 Backend 暴露给 Frontend 的「终端当前状态」视图（行、cell、光标、标题、attachment）。Frontend 在 `with_snapshot` 闭包里读它、画出像素；Backend 不知道它会被怎么画。它本身不是渲染结果，也不脱离当前进程（不加 `Serialize`）。
+
+**`subscribe_changes` 的实现说明**：内部以推送回调（`notify()`）为底层机制——SSH 读循环解析新数据、连接状态变化、重连清屏、shutdown 等会影响前端显示或连接状态的事件都会调用 `notify`。`subscribe_changes()` 返回的 `watch::Receiver` 由 Backend 在 `notify` 内同时 ping 一次，供 pull 风格的消费者（如未来 gpui）使用。egui 路线只用 notify（它就是 `egui::Context::request_repaint`），不消费 watch。它不是完整状态日志，只是“有变化，请重读 snapshot / 状态”的轻量通知。
 
 **没有 `Frontend` trait**——egui 和 gpui 的驱动模型差异太大（immediate vs retained），强造抽象只会变成性能秀。每个前端是自己的模块，消费同一个 `Backend`。
 

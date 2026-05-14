@@ -6,10 +6,11 @@
 
 **Architecture:**
 - All terminal model / SSH / parsing / attachment-detection code lives in `src/backend/`.
-- Welly's UI-neutral input event types (`KeyEvent`, `MouseEvent`, `InputEvent`) and the Welly-style key-bytes mapping live in `src/backend/input.rs` + `src/backend/keys.rs`. The egui frontend translates `egui::Event` → `InputEvent` once, then `Backend::send_input` produces SSH bytes via `backend::keys`.
+- Welly's UI-neutral input event types (`KeyEvent`, `MouseEvent`, `InputEvent`) live in `src/backend/input.rs`; the Welly-style key/mouse byte mappings live in `src/backend/keys.rs` + `src/backend/mouse.rs`. **All `InputEvent` → SSH byte translation lives inside `Backend::send_input`** — including text/IME GB18030 encoding and mouse-grid-click resolution. The egui frontend produces `InputEvent` values and does **not** call `backend::keys` / `backend::mouse` directly; this is what makes the boundary real for Phase 2's gpui frontend.
+- Frontends consume terminal state through `Backend::with_snapshot(|s: &TerminalSnapshot| ...)`. Backend's `Arc<Mutex<Terminal>>` is a **private** field. The egui rendering code accepts `&TerminalSnapshot`, not `&Terminal`. This is the second half of the Phase 2-ready boundary.
 - All egui-specific code (rendering, font setup, event translation, selection, URL detection, attachment button) lives in `src/ui/egui/`.
-- `src/app.rs` holds the `App` struct (currently in `main.rs`) and `impl eframe::App for App`. It is egui-coupled in Phase 1; Phase 2 will revisit the boundary when gpui frontend arrives.
-- `src/main.rs` is reduced to: constants for window size, `main()` startup, and `fn run_egui()` that calls into `src/ui/egui/`.
+- `src/app.rs` holds the `App` struct (currently in `main.rs`) and `impl eframe::App for App`. `App::new(cc: &eframe::CreationContext<'_>)` builds the `Backend` with the real `egui::Context`-derived notify callback at startup — no two-phase init via `Default`. App is egui-coupled in Phase 1; Phase 2 will revisit when gpui frontend arrives.
+- `src/main.rs` is reduced to: constants for window size, `main()` startup, and the eframe creation closure that builds `App::new(cc)`.
 
 **Tech Stack:** Rust 2021, egui 0.29 / eframe, tokio, russh, encoding_rs (GB18030), unicode-width, fontdb, crossbeam-channel. No new dependencies.
 
@@ -720,9 +721,13 @@ pub enum MouseEvent {
 pub enum InputEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
-    /// Already-decoded text from IME commit or plain typing. Backend
-    /// encodes to GB18030 before sending.
-    Text(String),
+    /// Already-decoded text from IME commit, plain typing, or clipboard
+    /// paste. Backend encodes to GB18030 before sending.
+    Paste(String),
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Reconnect,
     Shutdown,
 }
@@ -1333,50 +1338,82 @@ ordering move with the code."
 - Create: `src/ui/egui/input.rs`
 - Modify: `src/ui/egui/mod.rs`, `src/main.rs`
 
-The egui frontend's job in this layer: translate `egui::Event::Key/Text/Ime` into `backend::input::KeyEvent` (or `String` for text/IME), and call `backend::keys::bytes_for_key` for the actual byte mapping. Likewise translate `egui::Event::MouseWheel` into `WheelDir`.
+The egui frontend's job in this layer: translate native `egui::Event::Key/Text/Ime/MouseWheel` into UI-neutral `backend::input::InputEvent` values. The eventual public API is `input_event_for_egui_event(&egui::Event) -> Option<InputEvent>`; gpui will write a sibling that produces the same type.
+
+**However**, D2 runs before E2. App at D2 time still owns the SSH client and calls `send_bytes` directly — there's no `Backend::send_input` yet. So D2 also exports a transitional wrapper `bytes_for_egui_event(&egui::Event) -> Option<Vec<u8>>` that internally goes `egui::Event → InputEvent → bytes` (using `backend::keys`, `backend::mouse`, and inline GB18030 for paste). App's call sites continue to use `bytes_for_egui_event`; E2 deletes the wrapper and switches App to `input_event_for_egui_event + backend.send_input`.
+
+Mouse click → `GridPoint` conversion stays in egui because it requires the cell pixel size (an egui rendering concern). The grid coordinate is then carried in `InputEvent::Mouse(MouseEvent::Click(grid))` and Backend (E2) resolves the bytes against the current cursor.
 
 - [ ] **Step 1: Write `src/ui/egui/input.rs`**
 
 ```rust
 //! egui → backend input translation.
 
-use crate::backend::input::{Key, KeyEvent, Modifiers, WheelDir};
-use crate::backend::keys;
+use crate::backend::input::{InputEvent, Key, KeyEvent, Modifiers, MouseEvent, WheelDir};
+use crate::backend::{keys, mouse};
 use eframe::egui;
 use encoding_rs::GB18030;
 
-/// Translate an egui event to the bytes that should be sent to the BBS,
-/// or `None` if it isn't a forwardable input.
+/// **Transitional** (kept until E2): translate an egui event directly
+/// into the bytes that should be sent to SSH. Internally routes through
+/// `input_event_for_egui_event`; existing App call sites use this
+/// wrapper. After E2 lands, App calls `input_event_for_egui_event` and
+/// hands the result to `Backend::send_input`, and this wrapper is
+/// deleted.
 pub fn bytes_for_egui_event(event: &egui::Event) -> Option<Vec<u8>> {
+    let input = input_event_for_egui_event(event)?;
+    match input {
+        InputEvent::Key(k) => keys::bytes_for_key(k),
+        InputEvent::Mouse(MouseEvent::Wheel(d)) => Some(mouse::bytes_for_wheel(d)),
+        InputEvent::Mouse(MouseEvent::Click(_)) => None, // App handles clicks separately
+        InputEvent::Paste(text) => {
+            if text.is_empty() || text.chars().any(char::is_control) {
+                None
+            } else {
+                let (b, _, _) = GB18030.encode(&text);
+                Some(b.into_owned())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Translate an egui event to the corresponding `InputEvent`, or `None`
+/// if it isn't a forwardable input. Mouse clicks are NOT handled here —
+/// they require cell-pixel-size context the egui layer holds, so call
+/// `mouse_click_event` for those.
+pub fn input_event_for_egui_event(event: &egui::Event) -> Option<InputEvent> {
     match event {
         egui::Event::Key {
             key,
             pressed: true,
             modifiers,
             ..
-        } => keys::bytes_for_key(KeyEvent {
+        } => Some(InputEvent::Key(KeyEvent {
             key: translate_key(*key),
             modifiers: translate_modifiers(*modifiers),
-        }),
-        egui::Event::Text(text) => bytes_for_text(text),
-        egui::Event::Ime(egui::ImeEvent::Commit(text)) => bytes_for_text(text),
+        })),
+        egui::Event::Text(text) => paste_event(text),
+        egui::Event::Ime(egui::ImeEvent::Commit(text)) => paste_event(text),
+        egui::Event::MouseWheel { delta, .. } => {
+            wheel_dir_for_delta(*delta).map(|d| InputEvent::Mouse(MouseEvent::Wheel(d)))
+        }
         _ => None,
     }
 }
 
-/// Translate text (typed or IME-committed) to GB18030 bytes. Returns
-/// `None` for empty or control-character-containing strings.
-pub fn bytes_for_text(text: &str) -> Option<Vec<u8>> {
+/// Build an `InputEvent::Mouse(Click)` from a grid-space click. The egui
+/// caller is responsible for converting screen → grid (it owns the cell
+/// pixel size); backend then resolves the click against terminal state.
+pub fn mouse_click_event(grid: crate::backend::input::GridPoint) -> InputEvent {
+    InputEvent::Mouse(MouseEvent::Click(grid))
+}
+
+fn paste_event(text: &str) -> Option<InputEvent> {
     if text.is_empty() || text.chars().any(char::is_control) {
         return None;
     }
-    let (bytes, _, _) = GB18030.encode(text);
-    Some(bytes.into_owned())
-}
-
-pub fn bytes_for_wheel_delta(delta: egui::Vec2) -> Option<Vec<u8>> {
-    let dir = wheel_dir_for_delta(delta)?;
-    Some(crate::backend::mouse::bytes_for_wheel(dir))
+    Some(InputEvent::Paste(text.to_owned()))
 }
 
 fn wheel_dir_for_delta(delta: egui::Vec2) -> Option<WheelDir> {
@@ -1469,24 +1506,43 @@ pub fn translate_key(key: egui::Key) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::input::{InputEvent, MouseEvent};
 
-    #[test]
-    fn ime_commit_sends_committed_text() {
-        let event = egui::Event::Ime(egui::ImeEvent::Commit("中文".to_owned()));
-        assert_eq!(
-            bytes_for_egui_event(&event),
-            Some(vec![0xd6, 0xd0, 0xce, 0xc4])
-        );
+    fn key_event(ev: &egui::Event) -> Option<KeyEvent> {
+        match input_event_for_egui_event(ev) {
+            Some(InputEvent::Key(k)) => Some(k),
+            _ => None,
+        }
+    }
+
+    fn paste_text(ev: &egui::Event) -> Option<String> {
+        match input_event_for_egui_event(ev) {
+            Some(InputEvent::Paste(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    fn wheel_dir(ev: &egui::Event) -> Option<WheelDir> {
+        match input_event_for_egui_event(ev) {
+            Some(InputEvent::Mouse(MouseEvent::Wheel(d))) => Some(d),
+            _ => None,
+        }
     }
 
     #[test]
-    fn text_events_do_not_send_control_characters() {
+    fn ime_commit_emits_paste_event() {
+        let event = egui::Event::Ime(egui::ImeEvent::Commit("中文".to_owned()));
+        assert_eq!(paste_text(&event), Some("中文".to_owned()));
+    }
+
+    #[test]
+    fn text_with_control_chars_is_dropped() {
         assert_eq!(
-            bytes_for_egui_event(&egui::Event::Text("\u{0b}".to_owned())),
+            input_event_for_egui_event(&egui::Event::Text("\u{0b}".to_owned())),
             None
         );
         assert_eq!(
-            bytes_for_egui_event(&egui::Event::Ime(egui::ImeEvent::Commit(
+            input_event_for_egui_event(&egui::Event::Ime(egui::ImeEvent::Commit(
                 "\u{0b}".to_owned()
             ))),
             None
@@ -1494,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_letter_sends_ascii_control_code_via_egui() {
+    fn ctrl_letter_translates_to_key_event_with_ctrl_modifier() {
         let event = egui::Event::Key {
             key: egui::Key::G,
             physical_key: None,
@@ -1502,11 +1558,13 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::CTRL,
         };
-        assert_eq!(bytes_for_egui_event(&event), Some(vec![0x07]));
+        let k = key_event(&event).unwrap();
+        assert_eq!(k.key, Key::Letter('G'));
+        assert!(k.modifiers.ctrl);
     }
 
     #[test]
-    fn alt_arrows_match_welly_navigation_shortcuts() {
+    fn alt_arrow_translates_to_key_event_with_alt_modifier() {
         let make = |k: egui::Key| egui::Event::Key {
             key: k,
             physical_key: None,
@@ -1514,69 +1572,50 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::ALT,
         };
-        assert_eq!(
-            bytes_for_egui_event(&make(egui::Key::ArrowUp)),
-            Some(b"\x1b[5~".to_vec())
-        );
-        assert_eq!(
-            bytes_for_egui_event(&make(egui::Key::ArrowLeft)),
-            Some(b"\x1b[1~".to_vec())
-        );
+        let k = key_event(&make(egui::Key::ArrowUp)).unwrap();
+        assert_eq!(k.key, Key::ArrowUp);
+        assert!(k.modifiers.alt);
     }
 
     #[test]
-    fn command_only_shortcut_is_not_forwarded() {
-        let event = egui::Event::Key {
-            key: egui::Key::G,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::COMMAND,
-        };
-        assert_eq!(bytes_for_egui_event(&event), None);
-    }
-
-    #[test]
-    fn vertical_wheel_maps_to_welly_arrows() {
+    fn vertical_wheel_maps_to_wheel_dir() {
         assert_eq!(
-            bytes_for_wheel_delta(egui::vec2(0.0, 12.0)),
-            Some(b"\x1b[A".to_vec())
+            wheel_dir(&egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 12.0),
+                modifiers: egui::Modifiers::default(),
+            }),
+            Some(WheelDir::Up)
         );
         assert_eq!(
-            bytes_for_wheel_delta(egui::vec2(0.0, -12.0)),
-            Some(b"\x1b[B".to_vec())
-        );
-    }
-
-    #[test]
-    fn horizontal_wheel_maps_to_welly_arrows() {
-        assert_eq!(
-            bytes_for_wheel_delta(egui::vec2(12.0, 0.0)),
-            Some(b"\x1b[D".to_vec())
-        );
-        assert_eq!(
-            bytes_for_wheel_delta(egui::vec2(-12.0, 0.0)),
-            Some(b"\x1b[C".to_vec())
+            wheel_dir(&egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -12.0),
+                modifiers: egui::Modifiers::default(),
+            }),
+            Some(WheelDir::Down)
         );
     }
 }
 ```
 
+The `egui::Event::MouseWheel { unit, delta, modifiers }` shape above matches egui 0.29.x.
+
 - [ ] **Step 2: Register module**
 
 In `src/ui/egui/mod.rs`, add `pub mod input;`.
 
-- [ ] **Step 3: Delete the old code in main.rs**
+- [ ] **Step 3: Delete the old code in main.rs and update call sites**
 
 Remove from `src/main.rs`:
 - functions: `mouse_wheel_to_bytes`, `terminal_event_to_bytes`, `text_to_bytes`, `key_event_to_bytes`, `control_key_to_bytes`, `alt_key_to_bytes`
-- tests inside `mod tests` that target these functions: `mouse_wheel_vertical_maps_to_welly_arrows`, `mouse_wheel_horizontal_maps_to_welly_arrows`, `control_letter_sends_ascii_control_code`, `alt_arrows_match_welly_navigation_shortcuts`, `command_shortcuts_are_not_sent_to_bbs`, `ime_commit_sends_committed_text`, `text_events_do_not_send_control_characters` (these have been replicated, with adjustments, in `src/ui/egui/input.rs::tests`)
+- tests inside `mod tests` that target these functions: `mouse_wheel_vertical_maps_to_welly_arrows`, `mouse_wheel_horizontal_maps_to_welly_arrows`, `control_letter_sends_ascii_control_code`, `alt_arrows_match_welly_navigation_shortcuts`, `command_shortcuts_are_not_sent_to_bbs`, `ime_commit_sends_committed_text`, `text_events_do_not_send_control_characters` — byte-level assertions live in `backend::keys::tests` (C2) and `backend::mouse::tests` (C3); translation-only tests live in `ui::egui::input::tests`.
 
-Update call sites in main.rs's `handle_keyboard`:
-- `mouse_wheel_to_bytes(delta)` → `ui::egui::input::bytes_for_wheel_delta(delta)`
+Update call sites in main.rs's `handle_keyboard` (these continue to take the bytes path through the transitional wrapper; E2 will rewrite them to InputEvent + backend.send_input):
+- `mouse_wheel_to_bytes(delta)` → there's no longer a separate wheel function; `bytes_for_egui_event` handles `egui::Event::MouseWheel` directly. Adjust the call site to feed the entire `egui::Event` instead of a delta.
 - `terminal_event_to_bytes(&event)` → `ui::egui::input::bytes_for_egui_event(&event)`
 
-Also remove `use encoding_rs::GB18030;` if it's no longer referenced in main.rs (it shouldn't be; it's only used by `bytes_for_text`).
+Also remove `use encoding_rs::GB18030;` from main.rs — `bytes_for_egui_event` owns paste encoding now.
 
 - [ ] **Step 4: Verify**
 
@@ -1585,17 +1624,21 @@ cargo build
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
-Expected: all pass. Test count: 66 baseline − 7 removed from main + 7 in ui/egui/input.rs + 4 in backend/keys.rs + 4 in backend/mouse.rs = 74 tests.
+Expected: all pass. Test count rebalances: 7 byte-level tests removed from main, ~5 translation tests added in `ui/egui/input.rs`, byte tests in `backend::keys` / `backend::mouse` already exist from C2/C3.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -A
-git commit -m "refactor: move egui event → bytes translation to ui/egui/input.rs
+git commit -m "refactor: introduce egui InputEvent translation
 
-main.rs no longer owns the Welly key/wheel mapping; it delegates to
-ui::egui::input which calls backend::keys + backend::mouse. Existing
-tests moved with the code."
+ui::egui::input now exposes input_event_for_egui_event as the future
+frontend boundary. Because Backend::send_input does not exist until E2,
+this commit keeps a transitional bytes_for_egui_event wrapper so the
+current App can still call send_bytes without changing behavior.
+
+Byte-level tests live with the byte conversion code in backend::keys /
+backend::mouse; ui::egui::input tests cover translation only."
 ```
 
 ---
@@ -1614,10 +1657,15 @@ Move the following items from `src/main.rs` into this new file:
 - structs: `GridPoint`, `Selection`, `VisibleCharCell`
 - functions: `grid_index`, `selected_text`, `terminal_screen_text`, `url_at_grid_point`, `http_url_starts`, `is_trailing_url_punctuation`, `normalize_selected_url_for_open`, `trim_url_trailing_punctuation`, `is_scheme_url`, `looks_like_scheme_less_url`, `is_valid_domain_label`, `pos_to_grid_point`
 
+Adapt signatures: functions that previously took `&Terminal` now take `&TerminalSnapshot<'_>`. Specifically:
+- `selected_text(snapshot: &TerminalSnapshot<'_>, selection: &Selection) -> String`
+- `terminal_screen_text(snapshot: &TerminalSnapshot<'_>) -> String`
+- `url_at_grid_point(snapshot: &TerminalSnapshot<'_>, point: GridPoint) -> Option<String>`
+
 Make them `pub` as needed (whatever main.rs's App impl ends up calling). Update the file head:
 
 ```rust
-use crate::backend::terminal::Terminal;
+use crate::backend::snapshot::TerminalSnapshot;
 use eframe::egui;
 
 // Terminal grid dimensions are duplicated from main.rs constants to keep
@@ -1626,7 +1674,7 @@ use eframe::egui;
 const TERMINAL_COLS: usize = 80;
 ```
 
-Replace any `TERMINAL_COLS` reference inside the moved code with the local copy.
+Replace any `TERMINAL_COLS` reference inside the moved code with the local copy. Tests in this module construct a `Terminal` to drive snapshot creation: `let term = Terminal::new(24, 80); /* mutate */; let snap = term.snapshot(); selected_text(&snap, &sel)`.
 
 Move the corresponding tests too:
 - `selection_extracts_single_line_text`
@@ -1680,25 +1728,33 @@ live with the egui frontend. Tests move with the code."
 
 This is the largest task. Move all paint code plus the color helpers and Welly box-art renderer.
 
+**Important boundary change**: render functions take `&TerminalSnapshot`, not `&Terminal` and not `Arc<Mutex<Terminal>>`. The lock is acquired by the caller (App) once per frame via `backend.with_snapshot(|s| render_terminal(ui, s, ...))`. After this task, `src/ui/egui/render.rs` does **not** import `Terminal` — only `TerminalSnapshot` and `Cell`. This is the second half of the Phase 2-ready boundary.
+
 - [ ] **Step 1: Write `src/ui/egui/render.rs`**
 
 Move from `src/main.rs`:
 - structs: `TerminalResponse`, `TerminalPaintGeometry`
 - functions: `render_terminal`, `paint_terminal`, `paint_selection`, `paint_terminal_edge_bleed`, `visible_cell_at`, `cursor_underline_rect`, `text_paint_position`, `cell_background_color`, `cell_foreground_color`, `foreground_color`, `background_color`, `brighten`, `terminal_render_scale`, `color_to_egui`, `draw_welly_box_char`
 
+Adapt signatures so they read from `&TerminalSnapshot` instead of `&Terminal`:
+- `render_terminal(ui: &mut egui::Ui, snapshot: &TerminalSnapshot<'_>, selection: Option<&Selection>, zoom: f32) -> TerminalResponse`
+- `paint_terminal(painter: &egui::Painter, snapshot: &TerminalSnapshot<'_>, geometry: TerminalPaintGeometry, ...)`
+- `visible_cell_at(snapshot: &TerminalSnapshot<'_>, row, col) -> Option<&Cell>`
+
+`Selection` and `GridPoint` continue to live in `ui/egui/selection.rs` (they're an egui-layer concern, not backend state). `terminal_screen_text` (selection.rs) is also retyped to take `&TerminalSnapshot` in Task D3 — adjust D3's import list if D4 land first.
+
 Top of file:
 
 ```rust
 use crate::backend::cell::{self, Cell};
+use crate::backend::snapshot::TerminalSnapshot;
 use crate::ui::egui::fonts::{
     self, font_for_cell, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN, ENGLISH_LEFT_MARGIN,
     ENGLISH_TOP_MARGIN,
 };
 use crate::ui::egui::selection::{GridPoint, Selection, pos_to_grid_point};
-use crate::backend::terminal::Terminal;
 use eframe::egui;
 use egui::FontFamily;
-use std::sync::{Arc, Mutex};
 
 pub const CELL_WIDTH: f32 = 18.0;
 pub const CELL_HEIGHT: f32 = 35.0;
@@ -1709,6 +1765,8 @@ pub const MAX_ZOOM: f32 = 3.0;
 ```
 
 Move these constants from `main.rs` and mark them `pub`. main.rs will re-import from `ui::egui::render`.
+
+Note: `std::sync::{Arc, Mutex}` is **no longer** imported here — render no longer touches the terminal lock.
 
 The `TerminalResponse` struct's `interact_grid_point` / `hover_grid_point` use `pos_to_grid_point` which is in `selection.rs` — fine, imported above.
 
@@ -1765,12 +1823,16 @@ After D4: `wc -l src/main.rs` should be roughly 900–1100 lines (the App impl, 
 
 Goal: leave `main.rs` with only `main()`, the eframe options builder, the app icon, and the `mod` declarations.
 
+**Notable shape change**: `App` does NOT implement `Default`. Instead, `App::new(cc: &eframe::CreationContext<'_>) -> Self`. The eframe creation closure in `main.rs` does `Ok(Box::new(App::new(cc)))`. This is required for Phase 1 because in E2 the `Backend` needs the real `egui::Context`-derived notify callback at construction time — a stub notify followed by re-creation on the first frame would lose any state the SSH read loop wrote between the two events.
+
+In E1 the App still holds the existing three Arcs (terminal/parser/ssh_client) directly — `Backend` consolidation happens in E2. But the `App::new(cc)` plumbing is set up here so E2's only delta is "replace the three Arc fields with a single Backend field".
+
 - [ ] **Step 1: Write `src/app.rs`**
 
 Move from `src/main.rs`:
 - type aliases: `ConnectResult`, `ConnectSender`, `ConnectReceiver`
 - struct: `App`
-- `impl Default for App`
+- replace `impl Default for App` with `impl App { pub fn new(cc: &eframe::CreationContext<'_>) -> Self { ... } }`. The body is the old `Default::default()` body, with one addition: capture `cc.egui_ctx.clone()` as a field (e.g. `pub egui_ctx: egui::Context`) — E2 uses it to build the notify callback.
 - `impl eframe::App for App`
 - `impl App` (every method: `configure_viewport_once`, `start_connect`, `reconnect`, `render_login`, `render_attachment_button`, `handle_keyboard`, `handle_terminal_selection`, `handle_terminal_url_click`, `handle_terminal_mouse_click`, `copy_selection`, `open_selected_url`, `send_bytes`, `sync_window_size_to_terminal`)
 - helpers used only by App: `attachment_button_label`, `open_image_attachments`, `OpenUrlCommand`, `open_url_command`, `open_url`, `handle_zoom_shortcut`, `terminal_size_for_zoom`, `terminal_aspect_fit_size`
@@ -1827,7 +1889,8 @@ In `src/ui/egui/selection.rs`, delete the local `GridPoint` struct and replace w
 
 In `src/main.rs`:
 - Add `mod app;`
-- Add `use app::App;` (App is referenced by `Box::new(App::default())` in `main()`).
+- Add `use app::App;`
+- Change the eframe creation closure body from `Ok(Box::new(App::default()))` to `Ok(Box::new(App::new(cc)))`. `configure_fonts(&cc.egui_ctx)` and `configure_terminal_view(&cc.egui_ctx)` continue to run before `App::new(cc)` since they configure egui's global font registry.
 
 - [ ] **Step 4: Verify**
 
@@ -1859,56 +1922,182 @@ After E1: `wc -l src/main.rs` should be roughly 150–220 lines.
 - Create: `src/backend/backend.rs`
 - Modify: `src/backend/mod.rs`, `src/app.rs`
 
-Consolidate the three Arcs (`terminal`, `parser`, `ssh_client`) currently held by `App` into one `Backend` struct, exposing the API surface defined by the spec.
+Consolidate the three Arcs (`terminal`, `parser`, `ssh_client`) currently held by `App` into one `Backend` struct exposing the API surface from spec §3. Backend owns **all** `InputEvent` → byte translation (keys, mouse-with-cursor-resolution, GB18030 paste encoding) and **all** terminal state — its fields are private; the only read path is `with_snapshot`.
 
 - [ ] **Step 1: Write `src/backend/backend.rs`**
 
+(`tokio::sync::watch` is available — Cargo.toml uses `tokio = { features = ["full"] }`. No dependency change needed.)
+
 ```rust
 //! High-level backend API consumed by frontends.
+//!
+//! Spec §3 API. All InputEvent → bytes translation lives here so a future
+//! gpui frontend can reuse the byte mappings without touching SSH or
+//! terminal state directly.
 
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Receiver;
+use encoding_rs::GB18030;
+use tokio::sync::watch;
 
 use super::ansi_parser::AnsiParser;
-use super::input::InputEvent;
+use super::input::{InputEvent, MouseEvent};
+use super::snapshot::TerminalSnapshot;
 use super::ssh::{is_channel_closed_error, SshClient};
 use super::terminal::Terminal;
+use super::{keys, mouse};
 use crate::config::ConnectionSettings;
 
-pub type ConnectResult = Result<Arc<SshClient>, String>;
+type ConnectResult = Result<Arc<SshClient>, String>;
 
 pub struct Backend {
-    pub terminal: Arc<Mutex<Terminal>>,
-    pub parser: Arc<Mutex<AnsiParser>>,
-    pub client: Option<Arc<SshClient>>,
-    pub connect_rx: Option<Receiver<ConnectResult>>,
+    settings: Mutex<ConnectionSettings>,
+    terminal: Arc<Mutex<Terminal>>,
+    parser: Arc<Mutex<AnsiParser>>,
+    client: Mutex<Option<Arc<SshClient>>>,
+    connect_rx: Mutex<Option<Receiver<ConnectResult>>>,
+    connection_error: Mutex<Option<String>>,
     notify: Arc<dyn Fn() + Send + Sync>,
+    changes_tx: watch::Sender<()>,
 }
 
 impl Backend {
-    pub fn new(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub fn new(
+        config: ConnectionSettings,
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        let (changes_tx, _rx) = watch::channel(());
         Self {
+            settings: Mutex::new(config),
             terminal: Arc::new(Mutex::new(Terminal::new(24, 80))),
             parser: Arc::new(Mutex::new(AnsiParser::new())),
-            client: None,
-            connect_rx: None,
-            notify,
+            client: Mutex::new(None),
+            connect_rx: Mutex::new(None),
+            connection_error: Mutex::new(None),
+            notify: combined_notify(notify, changes_tx.clone()),
+            changes_tx,
+        }
+        // No auto-connect. Call `reconnect()` to start the first
+        // connection — App does this when settings look valid, or after
+        // the user submits the login form.
+    }
+
+    /// Read-only snapshot of terminal state. The closure runs under the
+    /// terminal lock; keep it short.
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&TerminalSnapshot<'_>) -> R) -> R {
+        let t = self.terminal.lock().unwrap();
+        let snap = t.snapshot();
+        f(&snap)
+    }
+
+    /// Translate a high-level input event into bytes and forward to SSH.
+    /// Owns text/IME GB18030 encoding, Welly key escape mapping, and the
+    /// wheel/entry/background mouse resolution against current cursor state.
+    pub fn send_input(&self, event: InputEvent) {
+        let bytes_opt = match event {
+            InputEvent::Key(k) => keys::bytes_for_key(k),
+            InputEvent::Mouse(m) => self.bytes_for_mouse(m),
+            InputEvent::Paste(text) => paste_bytes(&text),
+            InputEvent::Resize { .. } => {
+                // Welly is a fixed 24x80 BBS terminal. Resize is part of the
+                // InputEvent surface (spec §5) so future frontends or future
+                // resizable BBS profiles can route it through here, but the
+                // current Terminal has no resize path. No-op for Phase 1.
+                None
+            }
+            InputEvent::Reconnect => {
+                self.reconnect();
+                None
+            }
+            InputEvent::Shutdown => {
+                self.shutdown();
+                None
+            }
+        };
+        if let Some(b) = bytes_opt {
+            self.send_bytes(b);
         }
     }
 
-    /// Kick off an SSH connection on a background thread. Returns immediately.
-    /// Poll the result via `poll_connect_result`.
-    pub fn start_connect(&mut self, settings: ConnectionSettings) {
-        self.client = None;
+    /// Subscribe to lightweight change notifications. Returns a watch
+    /// receiver that fires whenever Backend or the SSH read loop calls the
+    /// internal notify. This is not a full state log; consumers should
+    /// re-read snapshot / connection state after receiving a change. Egui
+    /// frontend uses the push notify (egui::Context repaint); a future gpui
+    /// frontend can `await` this receiver.
+    pub fn subscribe_changes(&self) -> watch::Receiver<()> {
+        self.changes_tx.subscribe()
+    }
+
+    /// Drop current SSH client and start a fresh connection using the
+    /// most recently configured settings.
+    pub fn reconnect(&self) {
+        *self.client.lock().unwrap() = None;
+        self.spawn_connect();
+        (self.notify)();
+    }
+
+    /// Request graceful teardown. Drops the SSH client; the background
+    /// tokio runtime exits as the channel closes.
+    pub fn shutdown(&self) {
+        *self.client.lock().unwrap() = None;
+        *self.connect_rx.lock().unwrap() = None;
+        (self.notify)();
+    }
+
+    /// Update connection settings for future reconnects (login form).
+    pub fn update_settings(&self, settings: ConnectionSettings) {
+        *self.settings.lock().unwrap() = settings;
+        (self.notify)();
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.client
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|c| c.is_connected())
+    }
+
+    /// Drain the connect channel non-blockingly; promotes a successful
+    /// connection into `self.client` and stores an error for the UI.
+    /// Returns `Some(Ok(()))` exactly once on success, `Some(Err(msg))`
+    /// once on failure, `None` while still pending.
+    pub fn poll_connect_result(&self) -> Option<Result<(), String>> {
+        let rx = self.connect_rx.lock().unwrap().clone()?;
+        let result = rx.try_recv().ok()?;
+        *self.connect_rx.lock().unwrap() = None;
+        match result {
+            Ok(client) => {
+                *self.client.lock().unwrap() = Some(client);
+                (self.notify)();
+                Some(Ok(()))
+            }
+            Err(e) => {
+                *self.connection_error.lock().unwrap() = Some(e.clone());
+                Some(Err(e))
+            }
+        }
+    }
+
+    pub fn take_connection_error(&self) -> Option<String> {
+        self.connection_error.lock().unwrap().take()
+    }
+
+    // ---- internals ----
+
+    fn spawn_connect(&self) {
         self.terminal.lock().unwrap().clear_all();
-        self.parser = Arc::new(Mutex::new(AnsiParser::new()));
+        *self.parser.lock().unwrap() = AnsiParser::new();
+        (self.notify)();
 
         let terminal = Arc::clone(&self.terminal);
         let parser = Arc::clone(&self.parser);
         let notify = Arc::clone(&self.notify);
+        let settings = self.settings.lock().unwrap().clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.connect_rx = Some(rx);
+        *self.connect_rx.lock().unwrap() = Some(rx);
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1928,35 +2117,13 @@ impl Backend {
         });
     }
 
-    /// Drain the connect channel non-blockingly; updates internal state and
-    /// returns the outcome the caller should react to (login UI, etc.).
-    pub fn poll_connect_result(&mut self) -> Option<Result<(), String>> {
-        let rx = self.connect_rx.as_ref()?;
-        let result = rx.try_recv().ok()?;
-        self.connect_rx = None;
-        match result {
-            Ok(client) => {
-                self.client = Some(client);
-                Some(Ok(()))
-            }
-            Err(e) => Some(Err(e)),
-        }
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.client.as_ref().is_some_and(|c| c.is_connected())
-    }
-
-    /// Send a raw byte slice to the BBS. Spawns its own tokio runtime;
-    /// frontends call this without awaiting.
-    pub fn send_bytes(&self, bytes: Vec<u8>) {
-        let Some(client) = &self.client else {
+    fn send_bytes(&self, bytes: Vec<u8>) {
+        let Some(client) = self.client.lock().unwrap().clone() else {
             return;
         };
         if !client.is_connected() {
             return;
         }
-        let client = Arc::clone(client);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
@@ -1971,32 +2138,37 @@ impl Backend {
         });
     }
 
-    /// Translate a high-level [`InputEvent`] into bytes and forward to SSH.
-    pub fn send_input(&self, event: InputEvent) {
-        let bytes = match event {
-            InputEvent::Key(k) => super::keys::bytes_for_key(k),
-            InputEvent::Mouse(_) => None, // frontend currently translates to bytes itself
-            InputEvent::Text(t) => {
-                use encoding_rs::GB18030;
-                if t.is_empty() || t.chars().any(char::is_control) {
-                    None
+    fn bytes_for_mouse(&self, event: MouseEvent) -> Option<Vec<u8>> {
+        match event {
+            MouseEvent::Wheel(d) => Some(mouse::bytes_for_wheel(d)),
+            MouseEvent::Click(point) => {
+                let term = self.terminal.lock().unwrap();
+                if mouse::is_entry_click_point(&term, point) {
+                    Some(mouse::bytes_for_entry_click(term.cursor_row, point.row))
                 } else {
-                    let (b, _, _) = GB18030.encode(&t);
-                    Some(b.into_owned())
+                    mouse::bytes_for_background_navigation(point)
                 }
             }
-            InputEvent::Reconnect | InputEvent::Shutdown => None,
-        };
-        if let Some(b) = bytes {
-            self.send_bytes(b);
         }
     }
+}
 
-    pub fn with_snapshot<R>(&self, f: impl FnOnce(&super::snapshot::TerminalSnapshot) -> R) -> R {
-        let t = self.terminal.lock().unwrap();
-        let snap = t.snapshot();
-        f(&snap)
+fn paste_bytes(text: &str) -> Option<Vec<u8>> {
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return None;
     }
+    let (b, _, _) = GB18030.encode(text);
+    Some(b.into_owned())
+}
+
+fn combined_notify(
+    user: Arc<dyn Fn() + Send + Sync>,
+    tx: watch::Sender<()>,
+) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        user();
+        tx.send_replace(());
+    })
 }
 ```
 
@@ -2006,48 +2178,55 @@ In `src/backend/mod.rs`, add:
 
 ```rust
 mod backend;
-pub use backend::{Backend, ConnectResult};
+pub use backend::Backend;
 ```
 
-(Note: the file is `backend.rs` inside `src/backend/`; the `mod backend` declaration is non-public so callers reach the struct via `crate::backend::Backend`.)
+(The file is `backend.rs` inside `src/backend/`; the `mod backend` declaration is non-public so callers reach the struct via `crate::backend::Backend`.)
 
 - [ ] **Step 3: Migrate `App` to hold `Backend`**
 
-In `src/app.rs`, replace the three fields `terminal`, `parser`, `ssh_client` and `connect_rx` with a single `backend: crate::backend::Backend`. Update:
+In `src/app.rs`:
 
-- `App::default` constructs the backend with a no-op notify, then `update` replaces it on first call with a real notify keyed off the egui context. Easier: build a stub `Backend` in `default()`, then in `update()` on first frame upgrade its notify. Code:
+- Replace the four fields (`terminal`, `parser`, `ssh_client`, `connect_rx`) with a single `backend: crate::backend::Backend`. Also delete `auto_connect_attempted` if it existed — `App::new` performs the single initial connection decision explicitly after constructing Backend.
+- `App::new(cc)` constructs the backend directly with the real notify:
 
-```rust
-impl Default for App {
-    fn default() -> Self {
-        let settings = ConnectionSettings::load_default();
-        let login_host = settings.host.clone();
-        let login_port = settings.port.to_string();
-        let login_username = settings.username.clone().unwrap_or_default();
-        let backend = Backend::new(Arc::new(|| {})); // notify wired up in update()
-        Self {
-            backend,
-            backend_notify_initialized: false,
-            // …
-        }
-    }
-}
-```
+  ```rust
+  impl App {
+      pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+          let settings = ConnectionSettings::load_default();
+          let login_host = settings.host.clone();
+          let login_port = settings.port.to_string();
+          let login_username = settings.username.clone().unwrap_or_default();
+          let ctx = cc.egui_ctx.clone();
+          let notify: Arc<dyn Fn() + Send + Sync> =
+              Arc::new(move || ctx.request_repaint());
+          let backend = Backend::new(settings, notify);
+          Self {
+              backend,
+              login_host,
+              login_port,
+              login_username,
+              // ... other UI-only fields
+          }
+      }
+  }
+  ```
 
-In `update`, near the existing `configure_viewport_once`, add:
+- Replace every read of terminal state with `self.backend.with_snapshot(|snap| ...)`. There is no public `terminal` field anymore. For render: `self.backend.with_snapshot(|snap| render_terminal(ui, snap, selection.as_ref(), self.zoom))`. For selection / URL detection: similarly take a snapshot then call into `ui::egui::selection`.
+- Every keyboard/mouse handler routes through `self.backend.send_input(...)`. Delete App's local `send_bytes`. The only path left for raw bytes is paste-from-clipboard, which becomes `InputEvent::Paste(string)`.
+- App's `reconnect` becomes a thin wrapper: `self.backend.update_settings(self.current_login_settings()); self.backend.reconnect();`. Or it can stay if the login form mutates settings via a separate codepath.
+- Login form mutates a local copy and calls `self.backend.update_settings(new_settings)` before triggering reconnect.
+- Polling in `update`:
 
-```rust
-if !self.backend_notify_initialized {
-    let ctx = ctx.clone();
-    self.backend = Backend::new(Arc::new(move || ctx.request_repaint()));
-    self.backend_notify_initialized = true;
-}
-```
+  ```rust
+  match self.backend.poll_connect_result() {
+      Some(Ok(())) => { self.connected = true; }
+      Some(Err(e)) => { self.connection_error = Some(e); self.connected = false; }
+      None => {}
+  }
+  ```
 
-- Replace `self.terminal.lock().unwrap()` → `self.backend.with_snapshot(|snap| ... )` or `self.backend.terminal.lock().unwrap()` where the call signature needs the raw `&Terminal`. (The pub fields on Backend allow this; future tightening is a Phase 2 concern.)
-- Replace `self.send_bytes(b)` calls with `self.backend.send_bytes(b)`. Delete the App's local `send_bytes` method.
-- `start_connect` → `self.backend.start_connect(self.settings.clone())`.
-- Polling: replace the manual `connect_rx.try_recv` block with `match self.backend.poll_connect_result() { Some(Ok(())) => { self.connected = true; } Some(Err(e)) => { self.connection_error = Some(e); self.connected = false; } None => {} }`.
+- Initial auto-connect: in `App::new`, after building `Backend`, call `backend.reconnect()` iff settings have host + username (mirrors the old `auto_connect_attempted` gate in `default()/update`). If settings are incomplete, leave Backend idle — the login form path triggers `backend.reconnect()` on submit. (Note: this is the only call site of `reconnect()` for the "initial" case; spec calls it `reconnect` because Backend's lifecycle treats new connections and reconnects uniformly — there is no distinct "connect" verb.)
 
 - [ ] **Step 4: Verify**
 
@@ -2068,13 +2247,21 @@ If anything regresses, STOP and report. Do not move on to F1.
 
 ```bash
 git add -A
-git commit -m "feat(backend): introduce Backend struct as frontend-facing API
+git commit -m "feat(backend): deliver spec §3 Backend API
 
-Backend owns terminal/parser/SshClient + the notify callback, exposes
-start_connect / poll_connect_result / send_bytes / send_input /
-with_snapshot. App holds a single Backend instead of three Arcs.
+Backend owns terminal/parser/SshClient + notify + watch::Sender; exposes
+new(config, notify), with_snapshot, send_input, subscribe_changes,
+reconnect, shutdown — the surface Phase 2's gpui frontend consumes.
 
-This is the API surface Phase 2's gpui frontend will consume."
+send_input owns all InputEvent→bytes translation: Welly key escapes via
+backend::keys, mouse-with-cursor-resolution via backend::mouse, paste
+GB18030 encoding inline. ui::egui::input only translates egui::Event
+into InputEvent; no byte mapping leaks into the egui layer.
+
+App holds a single private Backend, accesses terminal state only via
+with_snapshot. Three Arc fields collapse into one. App::new(cc) builds
+Backend with the real egui::Context-derived notify at startup — no
+two-phase re-init."
 ```
 
 ---
@@ -2134,18 +2321,27 @@ Phase 2 (gpui prototype) gets its own spec + plan; do not start it from this pla
 
 ---
 
-## Deviations from spec
+## Conformance to spec
 
-The spec §3 sketches `Backend` with `new(config)`, `snapshot() -> &TerminalSnapshot`, `subscribe_changes() -> watch::Receiver<()>`, `reconnect()`, `shutdown()`. The plan implements a pragmatic variant:
+Phase 1 delivers spec §3's Backend API verbatim:
 
-- **`new(notify)` + `start_connect(settings)`** (split from `new(config)`): the egui repaint callback is only constructable after the `egui::Context` exists in `eframe::App::update`, so the App constructs Backend with a stub notify in `default()` and replaces it with the real one on the first frame. The `start_connect` call carries the latest settings so the login UI can mutate them between attempts.
-- **`with_snapshot(closure)`** (instead of `snapshot() -> &TerminalSnapshot`): the underlying `Terminal` is behind a `Mutex`, so the snapshot's lifetime must be tied to the lock guard. A closure-shaped API enforces this without unsafe.
-- **Push notify callback** (instead of `watch::Receiver<()>` subscription): the consumer is always `egui::Context::request_repaint`, which is already a callable. Adding a watch channel in between would mean a polling consumer, which doesn't match egui's reactive model. If a gpui frontend needs pull-style subscription, Phase 2 can add it without breaking the existing notify.
-- **`start_connect` + `poll_connect_result`** (pragmatic additions, not in spec): preserves the existing crossbeam-channel handoff between the tokio runtime thread and the egui frame loop. Avoids requiring App to know about tokio.
-- **`is_connected`, `send_bytes`** (pragmatic additions): used by the egui frontend's existing flow. Phase 2 may consolidate `send_bytes` into `send_input` once gpui exists and the byte-level path is no longer needed.
-- **No explicit `shutdown`** (deferred): App drops Backend on exit; tokio runtime thread observes the channel close and terminates. If Phase 2 needs explicit teardown signaling, add it then.
+```rust
+impl Backend {
+    pub fn new(config: ConnectionSettings, notify: Arc<dyn Fn() + Send + Sync>) -> Self;
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&TerminalSnapshot<'_>) -> R) -> R;
+    pub fn send_input(&self, event: InputEvent);
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()>;
+    pub fn reconnect(&self);
+    pub fn shutdown(&self);
+}
+```
 
-These are not violations of the Phase 1 contract — the Phase 1 contract is "main.rs ≤ 200 lines, behavior pixel-identical, tests pass, Backend exposes a clean API surface". They are honest concessions to the existing async/threading model. Phase 2's spec will revisit the Backend API once gpui's needs are concrete.
+Two implementation details worth flagging (not spec deviations):
+
+- **`subscribe_changes` is built on top of a notify callback.** Backend stores `Arc<dyn Fn() + Send + Sync>` (the push side, used by `SshClient::connect` to wake the egui frame loop) and a `watch::Sender<()>`. Every notify invocation also pings the watch sender, so pull-style consumers (future gpui frontend) can `await` the receiver and then re-read snapshot / connection state. This is a lightweight invalidation signal, not a full state log. The egui frontend in Phase 1 only uses the notify path through `cc.egui_ctx.request_repaint`; it does not subscribe.
+- **Connection async/sync handoff stays internal.** Backend kicks off SSH connection on a background tokio thread inside `new()` (or `reconnect()`) and uses an internal `crossbeam-channel` to expose connection state. The App sees connection state through `Backend::is_connected()` / `Backend::take_connection_error()` accessors, not the channel itself. App does not know about tokio.
+
+These are implementation details under spec's API, not departures from it.
 
 ---
 
@@ -2166,11 +2362,11 @@ These are not violations of the Phase 1 contract — the Phase 1 contract is "ma
 | C | C3 | backend/mouse.rs (Welly mouse→bytes) | `feat(backend):` |
 | C | C4 | backend/snapshot.rs (TerminalSnapshot) | `feat(backend):` |
 | D | D1 | ui/egui/fonts.rs | `refactor:` |
-| D | D2 | ui/egui/input.rs (egui → KeyEvent) | `refactor:` |
-| D | D3 | ui/egui/selection.rs (selection, URL) | `refactor:` |
-| D | D4 | ui/egui/render.rs (paint, box art) | `refactor:` |
-| E | E1 | src/app.rs (App + event loop) | `refactor:` |
-| E | E2 | Backend struct + App migration | `feat(backend):` |
+| D | D2 | ui/egui/input.rs (egui::Event → InputEvent) | `refactor:` |
+| D | D3 | ui/egui/selection.rs (selection, URL; consumes &TerminalSnapshot) | `refactor:` |
+| D | D4 | ui/egui/render.rs (paint, box art; consumes &TerminalSnapshot) | `refactor:` |
+| E | E1 | src/app.rs (App + event loop, App::new(cc)) | `refactor:` |
+| E | E2 | Backend struct with spec §3 API + App migration | `feat(backend):` |
 | F | F1 | Verify ≤200 lines + acceptance | (no commit unless cleanup needed) |
 
 19 commits total. Each is bisectable; each leaves the app functionally identical to baseline.
