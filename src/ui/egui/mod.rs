@@ -2,4 +2,5 @@
 
 pub mod fonts;
 pub mod input;
+pub mod render;
 pub mod selection;
