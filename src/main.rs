@@ -63,6 +63,7 @@ const CHINESE_FONT_CANDIDATES: &[FontCandidate] = &[
 
 mod ansi_parser;
 mod attachment;
+mod backend;
 mod cell;
 mod config;
 mod ssh;
