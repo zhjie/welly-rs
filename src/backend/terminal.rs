@@ -263,6 +263,17 @@ impl Terminal {
         self.cursor_col = col;
     }
 
+    #[allow(dead_code)]
+    pub fn snapshot(&self) -> super::snapshot::TerminalSnapshot<'_> {
+        super::snapshot::TerminalSnapshot {
+            rows: &self.grid,
+            cols: self.cols,
+            row_count: self.rows,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        }
+    }
+
     pub fn move_cursor_up(&mut self, n: usize) {
         if self.origin_mode {
             self.cursor_row = self.cursor_row.saturating_sub(n);

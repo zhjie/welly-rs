@@ -12,3 +12,7 @@ pub mod ssh;
 pub mod input;
 pub mod keys;
 pub mod mouse;
+pub mod snapshot;
+
+#[allow(unused_imports)]
+pub use snapshot::TerminalSnapshot;
