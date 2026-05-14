@@ -66,7 +66,6 @@ mod attachment;
 mod backend;
 mod config;
 mod ssh;
-mod terminal;
 
 use ansi_parser::AnsiParser;
 use attachment::{parse_image_attachments, ImageAttachment};
@@ -74,7 +73,7 @@ use backend::cell;
 use config::ConnectionSettings;
 use encoding_rs::GB18030;
 use ssh::{is_channel_closed_error, SshClient};
-use terminal::Terminal;
+use backend::terminal::Terminal;
 
 type ConnectResult = Result<Arc<SshClient>, String>;
 type ConnectSender = Sender<ConnectResult>;
@@ -1391,7 +1390,7 @@ mod tests {
         selected_text, terminal_aspect_fit_size, terminal_event_to_bytes, terminal_render_scale,
         terminal_size_for_zoom, FontCandidate, GridPoint, Selection, TERMINAL_COLS, TERMINAL_ROWS,
     };
-    use crate::terminal::Terminal;
+    use crate::backend::terminal::Terminal;
 
     #[test]
     fn mouse_wheel_vertical_maps_to_welly_arrows() {

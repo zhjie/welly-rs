@@ -1,5 +1,5 @@
 use crate::cell::Color;
-use crate::terminal::{Attribute, ClearLineMode, ClearScreenMode, Terminal};
+use crate::backend::terminal::{Attribute, ClearLineMode, ClearScreenMode, Terminal};
 use encoding_rs::{CoderResult, Decoder, GB18030};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -606,7 +606,7 @@ fn is_csi_final_byte(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::AnsiParser;
-    use crate::terminal::Terminal;
+    use crate::backend::terminal::Terminal;
 
     #[test]
     fn vertical_tab_advances_to_next_line() {
