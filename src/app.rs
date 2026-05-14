@@ -245,19 +245,12 @@ impl App {
         let events = ctx.input(|i| i.events.clone());
         for event in events {
             match event {
-                egui::Event::Copy => {
-                    self.copy_selection(ctx);
-                }
                 egui::Event::Key {
                     key,
                     pressed: true,
                     modifiers,
                     ..
                 } => {
-                    if modifiers.command && key == egui::Key::C && self.copy_selection(ctx) {
-                        continue;
-                    }
-
                     // macOS: Cmd+R (command=true, ctrl=false)
                     // Windows/Linux: Alt+R (alt=true, ctrl=false)
                     let is_reconnect = key == egui::Key::R
@@ -309,9 +302,11 @@ impl App {
                 selection.end = point;
                 self.suppress_mouse_entry_click = true;
             }
-        }
-
-        if ctx.input(|input| input.key_pressed(egui::Key::C) && input.modifiers.command) {
+        } else if terminal_response
+            .response
+            .drag_stopped_by(egui::PointerButton::Primary)
+        {
+            // Select-to-copy: automatically copy to clipboard when drag ends.
             self.copy_selection(ctx);
         }
 
