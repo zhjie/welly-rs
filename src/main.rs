@@ -64,14 +64,13 @@ const CHINESE_FONT_CANDIDATES: &[FontCandidate] = &[
 
 mod backend;
 mod config;
-mod ssh;
 
 use backend::ansi_parser::AnsiParser;
 use backend::attachment::{parse_image_attachments, ImageAttachment};
 use backend::cell;
 use config::ConnectionSettings;
 use encoding_rs::GB18030;
-use ssh::{is_channel_closed_error, SshClient};
+use backend::ssh::{is_channel_closed_error, SshClient};
 use backend::terminal::Terminal;
 
 type ConnectResult = Result<Arc<SshClient>, String>;
