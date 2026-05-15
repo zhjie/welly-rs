@@ -16,7 +16,7 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
 
 pub const CHINESE_FONT_SIZE: f32 = 32.0;
-pub const ENGLISH_FONT_SIZE: f32 = 28.0;
+pub const ENGLISH_FONT_SIZE: f32 = 27.0;
 pub const CHINESE_LEFT_MARGIN: f32 = 2.0;
 pub const CHINESE_TOP_MARGIN: f32 = 2.0;
 pub const ENGLISH_LEFT_MARGIN: f32 = 2.0;
@@ -134,11 +134,7 @@ pub const ENGLISH_FONT_CANDIDATES: &[FontCandidate] = &[
     },
     FontCandidate {
         egui_name: ENGLISH_FONT_NAME,
-        families: &["Consolas"],
-    },
-    FontCandidate {
-        egui_name: ENGLISH_FONT_NAME,
-        families: &["CaskaydiaMono"],
+        families: &["CaskaydiaMono Nerd Font"],
     },
 ];
 
