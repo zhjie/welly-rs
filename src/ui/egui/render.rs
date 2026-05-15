@@ -661,13 +661,14 @@ mod tests {
     }
 
     #[test]
-    fn english_text_position_centers_cap_height_in_cell() {
+    fn english_text_position_aligns_cap_top_to_reference() {
         let cell = Cell {
             ch: 'A',
             width: 1,
             ..Default::default()
         };
-        // ascent=20px, cap_height=14px → y_offset = CELL_HEIGHT/2 - 20 + 14/2 = 17.5 - 20 + 7 = 4.5
+        // ascent=20px, cap_height=14px
+        // y_offset = (CELL_HEIGHT - cap_ref)/2 + cap - ascent = (35-16)/2 + 14 - 20 = 9.5 - 6 = 3.5
         let metrics = FontMetrics {
             ascent_px: 20.0,
             cap_height_px: 14.0,
@@ -675,7 +676,7 @@ mod tests {
 
         let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
 
-        assert_eq!(pos, egui::pos2(11.0, 24.5));
+        assert_eq!(pos, egui::pos2(10.0 + ENGLISH_LEFT_MARGIN, 20.0 + 3.5));
     }
 
     #[test]
@@ -685,12 +686,12 @@ mod tests {
             width: 1,
             ..Default::default()
         };
-        // Very large ascent/cap → y_offset would be negative; must clamp to ENGLISH_TOP_MARGIN.
+        // Large ascent relative to cap → y_offset negative; must clamp to ENGLISH_TOP_MARGIN.
+        // ascent=30, cap=14 → y_offset = (35-16)/2 + 14 - 30 = 9.5 - 16 = -6.5 → clamped to 2.0
         let metrics = FontMetrics {
-            ascent_px: CELL_HEIGHT * 0.9,
-            cap_height_px: CELL_HEIGHT * 0.7,
+            ascent_px: 30.0,
+            cap_height_px: 14.0,
         };
-        // y_offset = 17.5 - 31.5 + 12.25 = -1.75 → clamped to 1.0
         let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
 
         assert!((pos.y - (20.0 + ENGLISH_TOP_MARGIN)).abs() < f32::EPSILON);
@@ -707,6 +708,9 @@ mod tests {
 
         let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
 
-        assert_eq!(pos, egui::pos2(11.0, 21.0));
+        assert_eq!(
+            pos,
+            egui::pos2(10.0 + CHINESE_LEFT_MARGIN, 20.0 + CHINESE_TOP_MARGIN)
+        );
     }
 }

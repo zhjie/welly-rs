@@ -21,6 +21,11 @@ pub const CHINESE_LEFT_MARGIN: f32 = 2.0;
 pub const CHINESE_TOP_MARGIN: f32 = 2.0;
 pub const ENGLISH_LEFT_MARGIN: f32 = 2.0;
 pub const ENGLISH_TOP_MARGIN: f32 = 2.0;
+/// Reference cap height (logical px) used to anchor the top of capital letters at the same
+/// cell-relative position across all fonts. Based on Monaco's measured cap height at
+/// `ENGLISH_FONT_SIZE = 26.0`. Fonts with a larger cap height are shifted down by half the
+/// excess so their letter tops align with this reference rather than centering independently.
+pub const ENGLISH_CAP_HEIGHT_REFERENCE: f32 = 16.0;
 
 /// Font metrics measured from the actual loaded English font at [`ENGLISH_FONT_SIZE`].
 /// Used to center capital letters optically in each cell instead of centering the em-square.
@@ -33,20 +38,28 @@ pub struct FontMetrics {
 }
 
 impl FontMetrics {
-    /// Vertical y-offset (logical px) that places the optical center of capital letters
-    /// at the vertical center of a cell with the given logical height.
+    /// Vertical y-offset (logical px) that aligns the top of capital letters to the same
+    /// cell-relative position across all fonts.
+    ///
+    /// The formula targets a fixed `cap_top = (cell_height - ENGLISH_CAP_HEIGHT_REFERENCE) / 2`
+    /// so that fonts with different cap heights still start their capital letters at the same
+    /// position, rather than each centering its own cap height independently (which would cause
+    /// fonts with larger cap heights to appear visually higher).
     pub fn vertical_center_y_offset(&self, cell_height_logical: f32) -> f32 {
-        cell_height_logical / 2.0 - self.ascent_px + self.cap_height_px / 2.0
+        (cell_height_logical - ENGLISH_CAP_HEIGHT_REFERENCE) / 2.0 + self.cap_height_px
+            - self.ascent_px
     }
 }
 
 impl Default for FontMetrics {
     fn default() -> Self {
-        // Chosen so that vertical_center_y_offset(CELL_HEIGHT) == (CELL_HEIGHT - ENGLISH_FONT_SIZE) / 2,
-        // i.e. the same as the old em-center formula with no correction offset.
+        // Fallback when the font file cannot be read.
+        // ascent = ENGLISH_FONT_SIZE * 0.75, cap_height = ENGLISH_CAP_HEIGHT_REFERENCE
+        // → vertical_center_y_offset(CELL_HEIGHT) = (35 - 16)/2 + 16 - 19.5 = 9.5 - 3.5 = 6.0
+        // This is close to a typical monospace offset and avoids any negative/clamped value.
         Self {
             ascent_px: ENGLISH_FONT_SIZE * 0.75,
-            cap_height_px: ENGLISH_FONT_SIZE * 0.50,
+            cap_height_px: ENGLISH_CAP_HEIGHT_REFERENCE,
         }
     }
 }
