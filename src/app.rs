@@ -536,7 +536,13 @@ fn open_url(url: &str) {
 }
 
 pub fn handle_zoom_shortcut(zoom: &mut f32, key: egui::Key, modifiers: egui::Modifiers) -> bool {
-    if !modifiers.command || modifiers.alt || modifiers.ctrl {
+    let is_zoom_modifier = if cfg!(target_os = "macos") {
+        modifiers.command && !modifiers.ctrl && !modifiers.alt
+    } else {
+        modifiers.ctrl || modifiers.alt
+    };
+
+    if !is_zoom_modifier {
         return false;
     }
 
@@ -626,6 +632,44 @@ mod tests {
             egui::Modifiers::COMMAND
         ));
         assert!((zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn zoom_shortcuts_on_non_mac_accept_ctrl_and_alt() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let mut zoom = 1.0;
+
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert!(handle_zoom_shortcut(&mut zoom, egui::Key::Plus, ctrl));
+        assert!(zoom > 1.0);
+
+        let alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        assert!(handle_zoom_shortcut(&mut zoom, egui::Key::Minus, alt));
+        assert!((zoom - 1.0).abs() < f32::EPSILON);
+
+        let reset_ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        zoom = 1.5;
+        assert!(handle_zoom_shortcut(&mut zoom, egui::Key::Num0, reset_ctrl));
+        assert_eq!(zoom, 1.0);
+
+        let reset_alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        zoom = 1.5;
+        assert!(handle_zoom_shortcut(&mut zoom, egui::Key::Num0, reset_alt));
+        assert_eq!(zoom, 1.0);
     }
 
     #[test]
