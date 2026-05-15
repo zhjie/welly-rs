@@ -33,7 +33,7 @@ pub const ENGLISH_FONT_CANDIDATES: &[FontCandidate] = &[
     },
     FontCandidate {
         egui_name: ENGLISH_FONT_NAME,
-        families: &["Cascadia Mono"],
+        families: &["Consolas"],
     },
     FontCandidate {
         egui_name: ENGLISH_FONT_NAME,

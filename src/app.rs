@@ -20,6 +20,8 @@ const ZOOM_STEP: f32 = 1.05;
 pub struct App {
     backend: Backend,
     connected: bool,
+    show_login: bool,
+    login_focus_initialized: bool,
     login_host: String,
     login_port: String,
     login_username: String,
@@ -41,6 +43,7 @@ impl App {
         let login_host = settings.host.clone();
         let login_port = settings.port.to_string();
         let login_username = settings.username.clone().unwrap_or_default();
+        let show_login = login_username.is_empty();
         let identity_files = settings.identity_files.clone();
         let ctx = cc.egui_ctx.clone();
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
@@ -51,6 +54,8 @@ impl App {
         Self {
             backend,
             connected: false,
+            show_login,
+            login_focus_initialized: false,
             login_host,
             login_port,
             login_username,
@@ -74,10 +79,15 @@ impl eframe::App for App {
         match self.backend.poll_connect_result() {
             Some(Ok(())) => {
                 self.connected = true;
+                self.show_login = false;
+                self.login_focus_initialized = false;
+                self.connection_error = None;
             }
             Some(Err(e)) => {
                 log::error!("SSH error: {}", e);
                 self.connected = false;
+                self.show_login = true;
+                self.login_focus_initialized = false;
                 self.connection_error = Some(e);
             }
             None => {}
@@ -101,10 +111,7 @@ impl eframe::App for App {
                 self.handle_terminal_selection(ctx, &terminal_response);
                 self.handle_terminal_mouse_click(&terminal_response);
                 self.render_attachment_button(ui);
-                if !self.connected
-                    && !self.backend.is_connecting()
-                    && (self.login_username.is_empty() || self.connection_error.is_some())
-                {
+                if self.should_show_login() {
                     self.render_login(ui, ctx);
                 }
             });
@@ -116,6 +123,14 @@ impl eframe::App for App {
 }
 
 impl App {
+    fn should_show_login(&self) -> bool {
+        should_show_login_panel(
+            self.show_login,
+            self.connected,
+            self.backend.is_connecting(),
+        )
+    }
+
     fn configure_viewport_once(&mut self, ctx: &egui::Context) {
         if self.configured_viewport {
             return;
@@ -171,51 +186,78 @@ impl App {
                             ui.label("Port");
                             ui.text_edit_singleline(&mut self.login_port);
                         });
-                        ui.horizontal(|ui| {
+                        let username_response = ui.horizontal(|ui| {
                             ui.label("User");
-                            ui.text_edit_singleline(&mut self.login_username);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.login_username)
+                                    .id_source("login_username"),
+                            )
                         });
-                        ui.horizontal(|ui| {
+                        let password_response = ui.horizontal(|ui| {
                             ui.label("Pass");
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.login_password).password(true),
-                            );
+                                egui::TextEdit::singleline(&mut self.login_password)
+                                    .password(true)
+                                    .id_source("login_password"),
+                            )
                         });
+
+                        let username_response = username_response.inner;
+                        let password_response = password_response.inner;
+
+                        if !self.login_focus_initialized {
+                            username_response.request_focus();
+                            self.login_focus_initialized = true;
+                        }
+
+                        let login_action = login_panel_action(
+                            text_edit_submitted(&username_response, ui),
+                            text_edit_submitted(&password_response, ui),
+                        );
+
+                        if login_action == LoginPanelAction::FocusPassword {
+                            password_response.request_focus();
+                        }
 
                         if let Some(error) = &self.connection_error {
                             ui.colored_label(egui::Color32::LIGHT_RED, error);
                         }
 
-                        ui.add_space(8.0);
-                        if ui.button("Connect").clicked() {
-                            if let Ok(port) = self.login_port.parse() {
-                                let new_settings = ConnectionSettings {
-                                    host: self.login_host.trim().to_owned(),
-                                    port,
-                                    username: if self.login_username.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(self.login_username.trim().to_owned())
-                                    },
-                                    password: if self.login_password.is_empty() {
-                                        None
-                                    } else {
-                                        Some(self.login_password.clone())
-                                    },
-                                    identity_files: self.identity_files.clone(),
-                                };
-                                self.connection_error = None;
-                                if new_settings.username.is_some() {
-                                    self.connected = false;
-                                    self.backend.update_settings(new_settings);
-                                    self.backend.reconnect();
-                                }
-                            } else {
-                                self.connection_error = Some("Invalid port".to_owned());
-                            }
+                        if login_action == LoginPanelAction::Submit {
+                            self.submit_login();
                         }
                     });
             });
+    }
+
+    fn submit_login(&mut self) {
+        if let Ok(port) = self.login_port.parse() {
+            let new_settings = ConnectionSettings {
+                host: self.login_host.trim().to_owned(),
+                port,
+                username: if self.login_username.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.login_username.trim().to_owned())
+                },
+                password: if self.login_password.is_empty() {
+                    None
+                } else {
+                    Some(self.login_password.clone())
+                },
+                identity_files: self.identity_files.clone(),
+            };
+            self.connection_error = None;
+            if new_settings.username.is_some() {
+                self.show_login = false;
+                self.login_focus_initialized = false;
+                self.connected = false;
+                self.backend.update_settings(new_settings);
+                self.backend.reconnect();
+            }
+        } else {
+            self.connection_error = Some("Invalid port".to_owned());
+        }
     }
 
     fn render_attachment_button(&self, ui: &mut egui::Ui) {
@@ -324,7 +366,9 @@ impl App {
             return;
         };
 
-        let url = self.backend.with_snapshot(|snap| url_at_grid_point(snap, point));
+        let url = self
+            .backend
+            .with_snapshot(|snap| url_at_grid_point(snap, point));
 
         if let Some(url) = url {
             terminal_response
@@ -391,9 +435,9 @@ impl App {
             return false;
         };
 
-        let url = self.backend.with_snapshot(|snap| {
-            normalize_selected_url_for_open(&selected_text(snap, selection))
-        });
+        let url = self
+            .backend
+            .with_snapshot(|snap| normalize_selected_url_for_open(&selected_text(snap, selection)));
 
         if let Some(url) = url {
             open_url(&url);
@@ -531,11 +575,37 @@ pub fn terminal_aspect_fit_size(size: egui::Vec2) -> egui::Vec2 {
     }
 }
 
+fn should_show_login_panel(show_login: bool, connected: bool, connecting: bool) -> bool {
+    show_login && !connected && !connecting
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginPanelAction {
+    None,
+    FocusPassword,
+    Submit,
+}
+
+fn login_panel_action(username_submitted: bool, password_submitted: bool) -> LoginPanelAction {
+    if password_submitted {
+        LoginPanelAction::Submit
+    } else if username_submitted {
+        LoginPanelAction::FocusPassword
+    } else {
+        LoginPanelAction::None
+    }
+}
+
+fn text_edit_submitted(response: &egui::Response, ui: &egui::Ui) -> bool {
+    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        attachment_button_label, handle_zoom_shortcut, open_url_command, terminal_aspect_fit_size,
-        terminal_size_for_zoom, OpenUrlCommand,
+        attachment_button_label, handle_zoom_shortcut, login_panel_action, open_url_command,
+        should_show_login_panel, terminal_aspect_fit_size, terminal_size_for_zoom,
+        LoginPanelAction, OpenUrlCommand,
     };
     use crate::ui::egui::render::{CELL_HEIGHT, CELL_WIDTH, TERMINAL_COLS, TERMINAL_ROWS};
 
@@ -591,6 +661,25 @@ mod tests {
         };
 
         assert_eq!(attachment_button_label(&attachment, 3), "打开 3 张图");
+    }
+
+    #[test]
+    fn login_panel_visibility_tracks_explicit_ui_state() {
+        assert!(should_show_login_panel(true, false, false));
+        assert!(!should_show_login_panel(false, false, false));
+        assert!(!should_show_login_panel(true, true, false));
+        assert!(!should_show_login_panel(true, false, true));
+    }
+
+    #[test]
+    fn login_panel_enter_navigation_prefers_submit_from_password() {
+        assert_eq!(login_panel_action(false, false), LoginPanelAction::None);
+        assert_eq!(
+            login_panel_action(true, false),
+            LoginPanelAction::FocusPassword
+        );
+        assert_eq!(login_panel_action(false, true), LoginPanelAction::Submit);
+        assert_eq!(login_panel_action(true, true), LoginPanelAction::Submit);
     }
 
     #[cfg(target_os = "windows")]

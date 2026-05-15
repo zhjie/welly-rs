@@ -32,10 +32,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(
-        config: ConnectionSettings,
-        notify: Arc<dyn Fn() + Send + Sync>,
-    ) -> Self {
+    pub fn new(config: ConnectionSettings, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (changes_tx, _rx) = watch::channel(());
         Self {
             settings: Mutex::new(config),

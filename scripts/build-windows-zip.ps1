@@ -23,12 +23,47 @@ $EffectiveTarget = if ($Target -ne "") { $Target } else { $DefaultMsvcTarget }
 
 Set-Location $RepoRoot
 
+function Get-BuildInputPaths {
+    @(
+        (Join-Path $RepoRoot "Cargo.toml")
+        (Join-Path $RepoRoot "Cargo.lock")
+        (Join-Path $RepoRoot "build.rs")
+        (Join-Path $RepoRoot "assets\welly-rs-icon.svg")
+        (Join-Path $RepoRoot "scripts\make-app-icons.py")
+    ) + (Get-ChildItem (Join-Path $RepoRoot "src") -Recurse -File | Select-Object -ExpandProperty FullName)
+}
+
+function Assert-BuildArtifactIsFresh {
+    param(
+        [string]$ArtifactPath
+    )
+
+    if (-not (Test-Path $ArtifactPath)) {
+        return
+    }
+
+    $artifactWriteTime = (Get-Item $ArtifactPath).LastWriteTimeUtc
+    $newerInput = Get-BuildInputPaths |
+        Where-Object { Test-Path $_ } |
+        Get-Item |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+
+    if ($null -ne $newerInput -and $newerInput.LastWriteTimeUtc -gt $artifactWriteTime) {
+        throw "SkipBuild would package a stale executable. '$($newerInput.FullName)' is newer than '$ArtifactPath'. Re-run without -SkipBuild."
+    }
+}
+
 if ($Target -ne "") {
     $TargetDir = Join-Path $RepoRoot "target\$Target\release"
     $BundleDir = Join-Path $TargetDir "bundle\windows"
     $PackageDir = Join-Path $BundleDir $AppName
     $ExePath = Join-Path $TargetDir $ExeName
     $PdbPath = Join-Path $TargetDir $PdbName
+}
+
+if ($SkipBuild) {
+    Assert-BuildArtifactIsFresh -ArtifactPath $ExePath
 }
 
 if (-not $SkipBuild) {
@@ -83,9 +118,6 @@ if (Test-Path $PackageDir) {
 New-Item -ItemType Directory -Force $PackageDir | Out-Null
 
 Copy-Item $ExePath (Join-Path $PackageDir $ExeName)
-if (Test-Path $PdbPath) {
-    Copy-Item $PdbPath (Join-Path $PackageDir $PdbName)
-}
 Copy-Item (Join-Path $RepoRoot "README.md") (Join-Path $PackageDir "README.md")
 Copy-Item (Join-Path $RepoRoot "LICENSE") (Join-Path $PackageDir "LICENSE")
 

@@ -215,7 +215,14 @@ fn paint_terminal(
 
             let (font_name, font_size) = font_for_cell(cell);
             painter.text(
-                text_paint_position(x, y, geometry.render_scale, cell),
+                text_paint_position(
+                    x,
+                    y,
+                    geometry.render_scale,
+                    geometry.cell_height,
+                    font_size,
+                    cell,
+                ),
                 egui::Align2::LEFT_TOP,
                 cell.ch.to_string(),
                 egui::FontId::new(
@@ -264,11 +271,22 @@ pub fn cursor_underline_rect(
     )
 }
 
-pub fn text_paint_position(x: f32, y: f32, render_scale: f32, cell: &Cell) -> egui::Pos2 {
+pub fn text_paint_position(
+    x: f32,
+    y: f32,
+    render_scale: f32,
+    cell_height: f32,
+    font_size: f32,
+    cell: &Cell,
+) -> egui::Pos2 {
     let (x_offset, y_offset) = if cell.width > 1 {
         (CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN)
     } else {
-        (ENGLISH_LEFT_MARGIN, ENGLISH_TOP_MARGIN)
+        let font_height = font_size * render_scale;
+        (
+            ENGLISH_LEFT_MARGIN,
+            ((cell_height - font_height) / (2.0 * render_scale) + 1.5).max(ENGLISH_TOP_MARGIN),
+        )
     };
 
     egui::pos2(x + x_offset * render_scale, y + y_offset * render_scale)
@@ -638,5 +656,31 @@ mod tests {
             terminal_render_scale(1.0, 1.0, TERMINAL_COLS, TERMINAL_ROWS),
             MIN_ZOOM
         );
+    }
+
+    #[test]
+    fn english_text_position_is_vertically_centered_in_cell() {
+        let cell = Cell {
+            ch: 'A',
+            width: 1,
+            ..Default::default()
+        };
+
+        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, 26.0, &cell);
+
+        assert_eq!(pos, egui::pos2(11.0, 26.0));
+    }
+
+    #[test]
+    fn chinese_text_position_keeps_welly_top_margin() {
+        let cell = Cell {
+            ch: '在',
+            width: 2,
+            ..Default::default()
+        };
+
+        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, 32.0, &cell);
+
+        assert_eq!(pos, egui::pos2(11.0, 21.0));
     }
 }
