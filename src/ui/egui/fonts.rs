@@ -16,16 +16,27 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
 
 pub const CHINESE_FONT_SIZE: f32 = 32.0;
-pub const ENGLISH_FONT_SIZE: f32 = 26.0;
+pub const ENGLISH_FONT_SIZE: f32 = 28.0;
 pub const CHINESE_LEFT_MARGIN: f32 = 2.0;
 pub const CHINESE_TOP_MARGIN: f32 = 2.0;
 pub const ENGLISH_LEFT_MARGIN: f32 = 2.0;
 pub const ENGLISH_TOP_MARGIN: f32 = 2.0;
-/// Reference cap height (logical px) used to anchor the top of capital letters at the same
-/// cell-relative position across all fonts. Based on Monaco's measured cap height at
-/// `ENGLISH_FONT_SIZE = 26.0`. Fonts with a larger cap height are shifted down by half the
-/// excess so their letter tops align with this reference rather than centering independently.
-pub const ENGLISH_CAP_HEIGHT_REFERENCE: f32 = 16.0;
+/// Optimization anchor: minimizes the cap-top gap between Chinese and English in mixed rows.
+///
+/// All loaded English fonts have their 'H' top placed at `(CELL_HEIGHT − r) / 2` from the
+/// cell top (where `r` is this constant), keeping Monaco and Consolas aligned with each other.
+///
+/// Derivation (measured at `ENGLISH_FONT_SIZE = 28 px`, `CELL_HEIGHT = 35 px`):
+/// - Monaco:   ascent = 22.40 px, cap_H = 17.00 px → overhead = 5.40 px
+/// - Heiti SC: ascent = 27.52 px, glyph top ≈ CHINESE_TOP_MARGIN + 1.5 px
+/// - Minimum English cap-top = `ENGLISH_TOP_MARGIN + overhead` = 2.0 + 5.40 = 7.40 px
+/// - Optimal `r = CELL_HEIGHT − 2 × (ENGLISH_TOP_MARGIN + overhead)` = 35 − 14.8 = **20.2**
+///   (rounded to 20.0; Monaco y_offset = 2.1 px, just above the 2.0 clamp)
+/// - Result: cap-top gap with Chinese ≈ 4 px (down from 7.5 px at r = 16)
+///
+/// The remaining ~4 px gap is irreducible: Monaco's 5.4 px overhead above capitals
+/// (reserved for diacritics like Á, É) is a fixed property of the font's metric design.
+pub const ENGLISH_CAP_HEIGHT_REFERENCE: f32 = 20.0;
 
 /// Font metrics measured from the actual loaded English font at [`ENGLISH_FONT_SIZE`].
 /// Used to center capital letters optically in each cell instead of centering the em-square.
@@ -54,9 +65,9 @@ impl FontMetrics {
 impl Default for FontMetrics {
     fn default() -> Self {
         // Fallback when the font file cannot be read.
-        // ascent = ENGLISH_FONT_SIZE * 0.75, cap_height = ENGLISH_CAP_HEIGHT_REFERENCE
-        // → vertical_center_y_offset(CELL_HEIGHT) = (35 - 16)/2 + 16 - 19.5 = 9.5 - 3.5 = 6.0
-        // This is close to a typical monospace offset and avoids any negative/clamped value.
+        // ascent = ENGLISH_FONT_SIZE * 0.75 = 21.0, cap_height = ENGLISH_CAP_HEIGHT_REFERENCE = 20
+        // → vertical_center_y_offset(CELL_HEIGHT) = (35 - 20)/2 + 20 - 21.0 = 7.5 - 1.0 = 6.5
+        // → cap-top T_en = 6.5 + (21-20) = 7.5 px  (matches the optimal target)
         Self {
             ascent_px: ENGLISH_FONT_SIZE * 0.75,
             cap_height_px: ENGLISH_CAP_HEIGHT_REFERENCE,
@@ -92,15 +103,9 @@ pub fn measure_font_metrics(data: &[u8], index: u32) -> FontMetrics {
     let cap_height_px = {
         let glyph_id = scaled.glyph_id('H');
         let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(0.0, 0.0));
-        // outline_glyph() returns None for empty/missing glyphs; px_bounds() gives pixel rect.
-        // Pen position is at the baseline (y=0). For 'H':
-        //   bounds.min.y < 0  (top of letter, above baseline)
-        //   bounds.max.y ≈ 0  (bottom of letter, at or slightly below baseline)
-        // We want to center the ACTUAL glyph, so use the midpoint:
-        //   glyph_center_from_baseline = (min.y + max.y) / 2
-        // Then cap_height_px = -(min.y + max.y) so that the formula
-        //   y_offset = cell/2 - ascent + cap_height_px/2  centers the glyph correctly.
-        // Using just -min.y (the pure height) would overcenter downward when max.y > 0.
+        // Pen is at baseline (y=0 in font coordinates). For 'H': min.y < 0 (above baseline),
+        // max.y ≈ 0 (at or very slightly below). -(min.y + max.y) equals -min.y when max.y=0
+        // and correctly handles sub-pixel overshoot when the glyph slightly crosses the baseline.
         font.outline_glyph(glyph)
             .map(|outlined| {
                 let b = outlined.px_bounds();
@@ -110,15 +115,6 @@ pub fn measure_font_metrics(data: &[u8], index: u32) -> FontMetrics {
             .unwrap_or(ascent_px * 0.7)
     };
 
-    // y_offset = cell_height/2 - ascent_px + cap_height_px/2 (at CELL_HEIGHT = 35.0)
-    let y_offset = 35.0_f32 / 2.0 - ascent_px + cap_height_px / 2.0;
-    log::info!(
-        "English font metrics: ascent={:.2}px cap_height={:.2}px → y_offset={:.2}px \
-         (at 35px cell height, old em-center was 4.5px)",
-        ascent_px,
-        cap_height_px,
-        y_offset,
-    );
     FontMetrics {
         ascent_px,
         cap_height_px,
@@ -622,8 +618,10 @@ mod tests {
 
     #[test]
     fn font_sizes_follow_welly_default_proportions() {
+        // Chinese: Welly proportions → (35 * 22 / 24).round() = 32
         assert_eq!(CHINESE_FONT_SIZE, (35.0_f32 * 22.0_f32 / 24.0).round());
-        assert_eq!(ENGLISH_FONT_SIZE, (35.0_f32 * 18.0_f32 / 24.0).round());
+        // English: bumped above Welly's 26px default for better readability
+        assert_eq!(ENGLISH_FONT_SIZE, 28.0);
     }
 
     #[test]

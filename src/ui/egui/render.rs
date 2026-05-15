@@ -667,11 +667,12 @@ mod tests {
             width: 1,
             ..Default::default()
         };
-        // ascent=20px, cap_height=14px
-        // y_offset = (CELL_HEIGHT - cap_ref)/2 + cap - ascent = (35-16)/2 + 14 - 20 = 9.5 - 6 = 3.5
+        // ascent=20px, cap_height=16px
+        // y_offset = (CELL_HEIGHT - cap_ref)/2 + cap - ascent = (35-20)/2 + 16 - 20 = 7.5 - 4 = 3.5
+        // cap-top T_en = 3.5 + (20 - 16) = 7.5 px  (= target (35-20)/2)
         let metrics = FontMetrics {
             ascent_px: 20.0,
-            cap_height_px: 14.0,
+            cap_height_px: 16.0,
         };
 
         let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
@@ -687,7 +688,7 @@ mod tests {
             ..Default::default()
         };
         // Large ascent relative to cap → y_offset negative; must clamp to ENGLISH_TOP_MARGIN.
-        // ascent=30, cap=14 → y_offset = (35-16)/2 + 14 - 30 = 9.5 - 16 = -6.5 → clamped to 2.0
+        // ascent=30, cap=14 → y_offset = (35-20)/2 + 14 - 30 = 7.5 - 16 = -8.5 → clamped to 2.0
         let metrics = FontMetrics {
             ascent_px: 30.0,
             cap_height_px: 14.0,

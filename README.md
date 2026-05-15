@@ -52,6 +52,55 @@ edge to go back, or the right-side upper/lower screen areas for PageUp/PageDown.
 - Chinese IME input, mouse selection/copy, basic Welly-style mouse navigation,
   anti-idle keepalive, clickable URLs, and image attachment opening.
 
+## Font Vertical Positioning
+
+The terminal uses a 80×24 cell grid with `CELL_WIDTH = 18.0` and `CELL_HEIGHT = 35.0` logical
+pixels. English and Chinese characters use separate fonts and sizing.
+
+### Optimization: cap-top alignment
+
+Goal: minimize the vertical gap between Chinese character tops and English capital tops in
+mixed rows (e.g. `Rust编程语言`). This is an optimization over two parameters:
+
+```
+Variables
+  t = CHINESE_TOP_MARGIN          (Chinese bounding-box top from cell top)
+  r = ENGLISH_CAP_HEIGHT_REFERENCE (anchor constant in English formula)
+  b = ENGLISH_TOP_MARGIN           (floor clamp for English y_offset)
+
+Measured at runtime via ab_glyph (values at ENGLISH_FONT_SIZE = 28 px):
+  a_en  = English ascent            Monaco 22.40, Consolas 20.79
+  κ_en  = English cap height ('H')  Monaco 17.00, Consolas 18.00
+  a_cn  = Chinese ascent            Heiti SC 27.52 at 32 px
+  h_cn  = Chinese glyph height      Heiti SC ≈ 26 px ('字' above baseline)
+
+Derived positions (from cell top):
+  T_cn  = t + (a_cn − h_cn)              ≈ CHINESE_TOP_MARGIN + 1.5 px
+  y_off = max( (H − r)/2 + κ_en − a_en , b )
+  T_en  = y_off + a_en − κ_en = (H − r)/2   (when not clamped)
+  Gap G = T_en − T_cn
+
+Minimise G: increase r until Monaco just hits the floor clamp b
+  r_opt = H − 2·(b + a_en − κ_en)
+        = 35 − 2·(2.0 + 22.4 − 17.0)
+        = 35 − 14.8 = 20.2  →  ENGLISH_CAP_HEIGHT_REFERENCE = 20.0 (rounded)
+
+Result at r = 20.0, t = 2.0, b = 2.0:
+  T_en (Monaco, Consolas) = 7.5 px  (both fonts anchor to same cap-top)
+  T_cn (Heiti SC 32 px)   ≈ 3.5 px
+  Gap G                   ≈ 4.0 px  (reduced from 7.5 px at r = 16)
+```
+
+The remaining ~4 px gap is irreducible: Monaco's 5.4 px overhead above capitals
+(`ascent − cap_height`, reserved for diacritics like Á, É) is a fixed property of the
+font's metric design. Cap-top perfect alignment would require a negative `y_offset`,
+clipping the English bounding box above the cell.
+
+### Chinese (fixed top margin)
+
+Chinese glyphs are placed at a fixed top margin: `y = CHINESE_TOP_MARGIN = 2.0` from the
+top of the cell. No cap-height measurement is used for CJK text.
+
 ## Roadmap
 
 1. Test cross-platform compatibility.
