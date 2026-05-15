@@ -1,8 +1,8 @@
 use crate::backend::cell::{self, Cell};
 use crate::backend::snapshot::TerminalSnapshot;
 use crate::ui::egui::fonts::{
-    font_for_cell, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN, ENGLISH_LEFT_MARGIN,
-    ENGLISH_TOP_MARGIN, ENGLISH_VERTICAL_CENTER_OFFSET,
+    english_font_metrics, font_for_cell, FontMetrics, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN,
+    ENGLISH_LEFT_MARGIN, ENGLISH_TOP_MARGIN,
 };
 use crate::ui::egui::selection::{pos_to_grid_point, GridPoint, Selection};
 use eframe::egui;
@@ -177,6 +177,7 @@ fn paint_terminal(
         );
     }
 
+    let english_metrics = english_font_metrics();
     for row in 0..snap.row_count {
         for col in 0..snap.cols {
             let cell = &snap.rows[row][col];
@@ -221,8 +222,8 @@ fn paint_terminal(
                     y,
                     geometry.render_scale,
                     geometry.cell_height,
-                    font_size,
                     cell,
+                    &english_metrics,
                 ),
                 egui::Align2::LEFT_TOP,
                 cell.ch.to_string(),
@@ -277,18 +278,17 @@ pub fn text_paint_position(
     y: f32,
     render_scale: f32,
     cell_height: f32,
-    font_size: f32,
     cell: &Cell,
+    english_metrics: &FontMetrics,
 ) -> egui::Pos2 {
     let (x_offset, y_offset) = if cell.width > 1 {
         (CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN)
     } else {
-        let font_height = font_size * render_scale;
-        (
-            ENGLISH_LEFT_MARGIN,
-            ((cell_height - font_height) / (2.0 * render_scale) + ENGLISH_VERTICAL_CENTER_OFFSET)
-                .max(ENGLISH_TOP_MARGIN),
-        )
+        let cell_height_logical = cell_height / render_scale;
+        let y_off = english_metrics
+            .vertical_center_y_offset(cell_height_logical)
+            .max(ENGLISH_TOP_MARGIN);
+        (ENGLISH_LEFT_MARGIN, y_off)
     };
 
     egui::pos2(x + x_offset * render_scale, y + y_offset * render_scale)
@@ -661,16 +661,39 @@ mod tests {
     }
 
     #[test]
-    fn english_text_position_is_vertically_centered_in_cell() {
+    fn english_text_position_centers_cap_height_in_cell() {
         let cell = Cell {
             ch: 'A',
             width: 1,
             ..Default::default()
         };
+        // ascent=20px, cap_height=14px → y_offset = CELL_HEIGHT/2 - 20 + 14/2 = 17.5 - 20 + 7 = 4.5
+        let metrics = FontMetrics {
+            ascent_px: 20.0,
+            cap_height_px: 14.0,
+        };
 
-        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, 26.0, &cell);
+        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
 
-        assert_eq!(pos, egui::pos2(11.0, 24.5 + ENGLISH_VERTICAL_CENTER_OFFSET));
+        assert_eq!(pos, egui::pos2(11.0, 24.5));
+    }
+
+    #[test]
+    fn english_text_position_clamps_to_top_margin() {
+        let cell = Cell {
+            ch: 'A',
+            width: 1,
+            ..Default::default()
+        };
+        // Very large ascent/cap → y_offset would be negative; must clamp to ENGLISH_TOP_MARGIN.
+        let metrics = FontMetrics {
+            ascent_px: CELL_HEIGHT * 0.9,
+            cap_height_px: CELL_HEIGHT * 0.7,
+        };
+        // y_offset = 17.5 - 31.5 + 12.25 = -1.75 → clamped to 1.0
+        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
+
+        assert!((pos.y - (20.0 + ENGLISH_TOP_MARGIN)).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -680,8 +703,9 @@ mod tests {
             width: 2,
             ..Default::default()
         };
+        let metrics = FontMetrics::default();
 
-        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, 32.0, &cell);
+        let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, &cell, &metrics);
 
         assert_eq!(pos, egui::pos2(11.0, 21.0));
     }

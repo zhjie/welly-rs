@@ -1,7 +1,9 @@
 use crate::backend::cell::Cell;
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
 use std::borrow::Cow;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
@@ -14,12 +16,101 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
 
 pub const CHINESE_FONT_SIZE: f32 = 32.0;
-pub const ENGLISH_FONT_SIZE: f32 = 30.0;
-pub const CHINESE_LEFT_MARGIN: f32 = 1.0;
-pub const CHINESE_TOP_MARGIN: f32 = 1.0;
-pub const ENGLISH_LEFT_MARGIN: f32 = 1.0;
-pub const ENGLISH_TOP_MARGIN: f32 = 1.0;
-pub const ENGLISH_VERTICAL_CENTER_OFFSET: f32 = 0.5;
+pub const ENGLISH_FONT_SIZE: f32 = 26.0;
+pub const CHINESE_LEFT_MARGIN: f32 = 2.0;
+pub const CHINESE_TOP_MARGIN: f32 = 2.0;
+pub const ENGLISH_LEFT_MARGIN: f32 = 2.0;
+pub const ENGLISH_TOP_MARGIN: f32 = 2.0;
+
+/// Font metrics measured from the actual loaded English font at [`ENGLISH_FONT_SIZE`].
+/// Used to center capital letters optically in each cell instead of centering the em-square.
+#[derive(Clone, Copy, Debug)]
+pub struct FontMetrics {
+    /// Distance (logical px) from the top of the text bounding box to the baseline.
+    pub ascent_px: f32,
+    /// Height (logical px) of capital letters as measured from the 'H' glyph.
+    pub cap_height_px: f32,
+}
+
+impl FontMetrics {
+    /// Vertical y-offset (logical px) that places the optical center of capital letters
+    /// at the vertical center of a cell with the given logical height.
+    pub fn vertical_center_y_offset(&self, cell_height_logical: f32) -> f32 {
+        cell_height_logical / 2.0 - self.ascent_px + self.cap_height_px / 2.0
+    }
+}
+
+impl Default for FontMetrics {
+    fn default() -> Self {
+        // Chosen so that vertical_center_y_offset(CELL_HEIGHT) == (CELL_HEIGHT - ENGLISH_FONT_SIZE) / 2,
+        // i.e. the same as the old em-center formula with no correction offset.
+        Self {
+            ascent_px: ENGLISH_FONT_SIZE * 0.75,
+            cap_height_px: ENGLISH_FONT_SIZE * 0.50,
+        }
+    }
+}
+
+static ENGLISH_FONT_METRICS: OnceLock<FontMetrics> = OnceLock::new();
+
+pub fn set_english_font_metrics(metrics: FontMetrics) {
+    let _ = ENGLISH_FONT_METRICS.set(metrics);
+}
+
+pub fn english_font_metrics() -> FontMetrics {
+    ENGLISH_FONT_METRICS.get().copied().unwrap_or_default()
+}
+
+/// Measure [`FontMetrics`] for the English font from its raw bytes.
+/// Uses ab_glyph to read ascent and the bounding box of 'H' at [`ENGLISH_FONT_SIZE`].
+pub fn measure_font_metrics(data: &[u8], index: u32) -> FontMetrics {
+    let font = match FontRef::try_from_slice_and_index(data, index) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("Could not parse font for metrics measurement: {e}");
+            return FontMetrics::default();
+        }
+    };
+
+    let scale = PxScale::from(ENGLISH_FONT_SIZE);
+    let scaled = font.as_scaled(scale);
+    let ascent_px = scaled.ascent();
+
+    let cap_height_px = {
+        let glyph_id = scaled.glyph_id('H');
+        let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(0.0, 0.0));
+        // outline_glyph() returns None for empty/missing glyphs; px_bounds() gives pixel rect.
+        // Pen position is at the baseline (y=0). For 'H':
+        //   bounds.min.y < 0  (top of letter, above baseline)
+        //   bounds.max.y ≈ 0  (bottom of letter, at or slightly below baseline)
+        // We want to center the ACTUAL glyph, so use the midpoint:
+        //   glyph_center_from_baseline = (min.y + max.y) / 2
+        // Then cap_height_px = -(min.y + max.y) so that the formula
+        //   y_offset = cell/2 - ascent + cap_height_px/2  centers the glyph correctly.
+        // Using just -min.y (the pure height) would overcenter downward when max.y > 0.
+        font.outline_glyph(glyph)
+            .map(|outlined| {
+                let b = outlined.px_bounds();
+                -(b.min.y + b.max.y)
+            })
+            .filter(|&v| v > 0.0)
+            .unwrap_or(ascent_px * 0.7)
+    };
+
+    // y_offset = cell_height/2 - ascent_px + cap_height_px/2 (at CELL_HEIGHT = 35.0)
+    let y_offset = 35.0_f32 / 2.0 - ascent_px + cap_height_px / 2.0;
+    log::info!(
+        "English font metrics: ascent={:.2}px cap_height={:.2}px → y_offset={:.2}px \
+         (at 35px cell height, old em-center was 4.5px)",
+        ascent_px,
+        cap_height_px,
+        y_offset,
+    );
+    FontMetrics {
+        ascent_px,
+        cap_height_px,
+    }
+}
 
 pub const ENGLISH_FONT_NAME: &str = "welly-english";
 pub const CHINESE_FONT_NAME: &str = "welly-chinese";
@@ -72,6 +163,7 @@ pub struct LoadedFont {
     pub family_name: String,
     pub data: Vec<u8>,
     pub index: u32,
+    pub metrics: FontMetrics,
 }
 
 pub fn font_for_cell(cell: &Cell) -> (&'static str, f32) {
@@ -187,6 +279,7 @@ fn build_font_definitions_from_loaded_fonts(
 
     if let Some(loaded) = english_font {
         log::info!("Using English font '{}'", loaded.family_name);
+        set_english_font_metrics(loaded.metrics);
         insert_loaded_font(&mut fonts, loaded);
     } else if log_missing_fonts {
         log::warn!("No English candidate fonts found; egui will use fallback families");
@@ -330,6 +423,7 @@ fn load_windows_font_family(egui_name: &'static str, family: &str) -> Option<Loa
     Some(LoadedFont {
         egui_name,
         family_name,
+        metrics: measure_font_metrics(&data, face.index),
         data,
         index: face.index,
     })
@@ -488,6 +582,7 @@ pub fn load_candidate_font_data(
             return Some(LoadedFont {
                 egui_name: candidate.egui_name,
                 family_name: (*family).to_owned(),
+                metrics: measure_font_metrics(&data, face.index),
                 data,
                 index: face.index,
             });

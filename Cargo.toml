@@ -19,6 +19,7 @@ crossbeam-channel = "0.5.15"
 encoding_rs = "0.8.35"
 unicode-width = "0.1"
 fontdb = "0.23.0"
+ab_glyph = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
