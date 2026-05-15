@@ -14,11 +14,12 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
 
 pub const CHINESE_FONT_SIZE: f32 = 32.0;
-pub const ENGLISH_FONT_SIZE: f32 = 26.0;
+pub const ENGLISH_FONT_SIZE: f32 = 30.0;
 pub const CHINESE_LEFT_MARGIN: f32 = 1.0;
 pub const CHINESE_TOP_MARGIN: f32 = 1.0;
 pub const ENGLISH_LEFT_MARGIN: f32 = 1.0;
 pub const ENGLISH_TOP_MARGIN: f32 = 1.0;
+pub const ENGLISH_VERTICAL_CENTER_OFFSET: f32 = 0.5;
 
 pub const ENGLISH_FONT_NAME: &str = "welly-english";
 pub const CHINESE_FONT_NAME: &str = "welly-chinese";
@@ -266,7 +267,11 @@ fn append_font_name(families: &mut Vec<String>, font_name: Option<&str>) {
     families.push(font_name.to_owned());
 }
 
-fn family_chain(primary: Option<&str>, secondary: Option<&str>, fallbacks: &[String]) -> Vec<String> {
+fn family_chain(
+    primary: Option<&str>,
+    secondary: Option<&str>,
+    fallbacks: &[String],
+) -> Vec<String> {
     let mut chain = Vec::with_capacity(fallbacks.len() + 2);
     push_unique_font_name(&mut chain, primary);
     push_unique_font_name(&mut chain, secondary);
@@ -640,10 +645,7 @@ mod tests {
     fn family_chain_appends_real_fallback_font_names() {
         let fallbacks = vec!["fallback-a".to_owned(), "fallback-b".to_owned()];
 
-        assert_eq!(
-            family_chain(None, None, &fallbacks),
-            fallbacks
-        );
+        assert_eq!(family_chain(None, None, &fallbacks), fallbacks);
         assert_eq!(
             family_chain(Some(ENGLISH_FONT_NAME), Some("fallback-a"), &fallbacks),
             vec![

@@ -1,7 +1,8 @@
 use crate::backend::cell::{self, Cell};
 use crate::backend::snapshot::TerminalSnapshot;
 use crate::ui::egui::fonts::{
-    font_for_cell, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN, ENGLISH_LEFT_MARGIN, ENGLISH_TOP_MARGIN,
+    font_for_cell, CHINESE_LEFT_MARGIN, CHINESE_TOP_MARGIN, ENGLISH_LEFT_MARGIN,
+    ENGLISH_TOP_MARGIN, ENGLISH_VERTICAL_CENTER_OFFSET,
 };
 use crate::ui::egui::selection::{pos_to_grid_point, GridPoint, Selection};
 use eframe::egui;
@@ -285,7 +286,8 @@ pub fn text_paint_position(
         let font_height = font_size * render_scale;
         (
             ENGLISH_LEFT_MARGIN,
-            ((cell_height - font_height) / (2.0 * render_scale) + 1.5).max(ENGLISH_TOP_MARGIN),
+            ((cell_height - font_height) / (2.0 * render_scale) + ENGLISH_VERTICAL_CENTER_OFFSET)
+                .max(ENGLISH_TOP_MARGIN),
         )
     };
 
@@ -668,7 +670,7 @@ mod tests {
 
         let pos = text_paint_position(10.0, 20.0, 1.0, CELL_HEIGHT, 26.0, &cell);
 
-        assert_eq!(pos, egui::pos2(11.0, 26.0));
+        assert_eq!(pos, egui::pos2(11.0, 24.5 + ENGLISH_VERTICAL_CENTER_OFFSET));
     }
 
     #[test]
