@@ -621,7 +621,7 @@ mod tests {
         // Chinese: Welly proportions → (35 * 22 / 24).round() = 32
         assert_eq!(CHINESE_FONT_SIZE, (35.0_f32 * 22.0_f32 / 24.0).round());
         // English: bumped above Welly's 26px default for better readability
-        assert_eq!(ENGLISH_FONT_SIZE, 26.0);
+        assert_eq!(ENGLISH_FONT_SIZE, 27.0);
     }
 
     #[test]
@@ -698,7 +698,10 @@ mod tests {
             .copied()
             .collect();
 
-        assert_eq!(families, vec!["Monaco", "CaskaydiaMono Nerd Font", "Consolas"]);
+        assert_eq!(
+            families,
+            vec!["Monaco", "CaskaydiaMono Nerd Font", "Consolas"]
+        );
     }
 
     #[test]
